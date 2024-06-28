@@ -586,6 +586,15 @@ impl AutoCommit {
         SyncWrapper { inner: self }
     }
 
+    /// An implementation of [`crate::rr_sync::SyncDoc`] for this autocommit
+    ///
+    /// This ensures that any outstanding transactions for this document are committed before
+    /// taking part in the sync protocol
+    pub fn rr_sync(&mut self) -> impl crate::rr_sync::SyncDoc + '_ {
+        self.ensure_transaction_closed();
+        SyncWrapper { inner: self }
+    }
+
     /// Get the hash of the change that contains the given `opid`.
     ///
     /// Returns [`None`] if the `opid`:
@@ -1064,6 +1073,54 @@ impl<'a> SyncDoc for SyncWrapper<'a> {
         self.inner
             .doc
             .receive_sync_message_log_patches(sync_state, message, patch_log)
+    }
+}
+
+impl<'a> crate::rr_sync::SyncDoc for SyncWrapper<'a> {
+    fn generate_sync_message(
+        &self,
+        sync_state: &mut crate::rr_sync::State,
+    ) -> Option<crate::rr_sync::Message> {
+        crate::rr_sync::SyncDoc::generate_sync_message(&self.inner.doc, sync_state)
+    }
+
+    fn receive_sync_message(
+        &mut self,
+        sync_state: &mut crate::rr_sync::State,
+        message: crate::rr_sync::Message,
+    ) -> Result<(), AutomergeError> {
+        self.inner.ensure_transaction_closed();
+        if self.inner.isolation.is_some() {
+            crate::rr_sync::SyncDoc::receive_sync_message_log_patches(
+                &mut self.inner.doc,
+                sync_state,
+                message,
+                &mut PatchLog::null(),
+            )
+        } else {
+            crate::rr_sync::SyncDoc::receive_sync_message_log_patches(
+                &mut self.inner.doc,
+                sync_state,
+                message,
+                &mut self.inner.patch_log,
+            )
+        }
+    }
+
+    // I dont like this function - it makes sense on automerge but not autocommit
+    // FIXME
+    fn receive_sync_message_log_patches(
+        &mut self,
+        sync_state: &mut crate::rr_sync::State,
+        message: crate::rr_sync::Message,
+        patch_log: &mut PatchLog,
+    ) -> Result<(), AutomergeError> {
+        crate::rr_sync::SyncDoc::receive_sync_message_log_patches(
+            &mut self.inner.doc,
+            sync_state,
+            message,
+            patch_log,
+        )
     }
 }
 

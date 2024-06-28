@@ -281,6 +281,7 @@ mod read;
 mod sequence_tree;
 mod storage;
 pub mod sync;
+pub mod rr_sync;
 mod text_diff;
 mod text_value;
 pub mod transaction;
