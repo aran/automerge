@@ -851,8 +851,14 @@ mod tests {
         doc.put(crate::ROOT, "key", "value").unwrap();
         let mut sync_state = State::new();
 
-        assert!(doc.rr_sync().generate_sync_message(&mut sync_state).is_some());
-        assert!(doc.rr_sync().generate_sync_message(&mut sync_state).is_none());
+        assert!(doc
+            .rr_sync()
+            .generate_sync_message(&mut sync_state)
+            .is_some());
+        assert!(doc
+            .rr_sync()
+            .generate_sync_message(&mut sync_state)
+            .is_none());
     }
 
     #[test]
@@ -945,8 +951,12 @@ mod tests {
         assert_eq!(msg2to1.have[0].last_sync.len(), 0);
 
         //// doc1 and doc2 receive that message and update sync state
-        doc1.rr_sync().receive_sync_message(&mut s1, msg2to1).unwrap();
-        doc2.rr_sync().receive_sync_message(&mut s2, msg1to2).unwrap();
+        doc1.rr_sync()
+            .receive_sync_message(&mut s1, msg2to1)
+            .unwrap();
+        doc2.rr_sync()
+            .receive_sync_message(&mut s2, msg1to2)
+            .unwrap();
 
         //// now both reply with their local changes the other lacks
         //// (standard warning that 1% of the time this will result in a "need" message)
@@ -971,10 +981,14 @@ mod tests {
         assert!(!changes2to1.is_empty());
 
         //// both should now apply the changes
-        doc1.rr_sync().receive_sync_message(&mut s1, msg2to1).unwrap();
+        doc1.rr_sync()
+            .receive_sync_message(&mut s1, msg2to1)
+            .unwrap();
         assert_eq!(doc1.get_missing_deps(&[]), Vec::new());
 
-        doc2.rr_sync().receive_sync_message(&mut s2, msg1to2).unwrap();
+        doc2.rr_sync()
+            .receive_sync_message(&mut s2, msg1to2)
+            .unwrap();
         assert_eq!(doc2.get_missing_deps(&[]), Vec::new());
 
         //// The response acknowledges the changes received and sends no further changes
@@ -998,8 +1012,12 @@ mod tests {
         assert_eq!(changes2to1.len(), 0);
 
         //// After receiving acknowledgements, their shared heads should be equal
-        doc1.rr_sync().receive_sync_message(&mut s1, msg2to1).unwrap();
-        doc2.rr_sync().receive_sync_message(&mut s2, msg1to2).unwrap();
+        doc1.rr_sync()
+            .receive_sync_message(&mut s1, msg2to1)
+            .unwrap();
+        doc2.rr_sync()
+            .receive_sync_message(&mut s2, msg1to2)
+            .unwrap();
 
         assert_eq!(s1.shared_heads, s2.shared_heads);
 
@@ -1272,7 +1290,9 @@ mod tests {
             .generate_sync_message(&mut s1)
             .expect("message was none");
 
-        doc2.rr_sync().receive_sync_message(&mut s2, outgoing).unwrap();
+        doc2.rr_sync()
+            .receive_sync_message(&mut s2, outgoing)
+            .unwrap();
 
         let response = doc2
             .rr_sync()
@@ -1475,7 +1495,7 @@ mod scenario_tests {
                 }
                 SyncEvent::DeliverAndClearAllMessages {} => {
                     self.flush_network();
-                },
+                }
                 SyncEvent::ResetSyncState { participant } => {
                     self.participants[participant.0].state = State::new();
                 }
@@ -1678,10 +1698,13 @@ mod scenario_tests {
     fn test_sync_empty_docs() {
         let scenario = SyncScenario {
             initial_states: vec![AutoCommit::new(), AutoCommit::new()],
-            participant_behaviors: vec![new_client_initiated_partipant(), ParticipantBehavior::ServerResponsive],
-            events: vec![
-                SyncEvent::RunParticipant { participant: ParticipantId(0) }
+            participant_behaviors: vec![
+                new_client_initiated_partipant(),
+                ParticipantBehavior::ServerResponsive,
             ],
+            events: vec![SyncEvent::RunParticipant {
+                participant: ParticipantId(0),
+            }],
         };
         let simulation = test_sync_eventually_completes(scenario);
         assert_eq!(simulation.network.total_messages_delivered, 2);
