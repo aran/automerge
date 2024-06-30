@@ -739,9 +739,9 @@ fn advance_heads(
 mod tests {
     use super::*;
     use crate::change::gen::gen_change;
+    use crate::rr_sync::SyncDoc;
     use crate::storage::parse::Input;
     use crate::storage::Chunk;
-    use crate::rr_sync::SyncDoc;
     use crate::transaction::Transactable;
     use crate::types::gen::gen_hash;
     use crate::ActorId;
@@ -1283,5 +1283,407 @@ mod tests {
 
         let (_, chunk) = Chunk::parse(Input::new(&changes.0[0])).unwrap();
         assert!(matches!(chunk, Chunk::Document(_)));
+    }
+
+    // Tests to write:
+    // * If "client" has a fast-forward change, sync ends in one round (if no losses)
+    // * If "server" has a fast-forward change, sync ends in one round (if no losses)
+    // * If both sides have the same changes applied from elsewhere, sync ends in one round (if no losses)
+    // * If all has been sent but not acknowledged yet, we don't send again (but we're also not done!)
+    // * If "client" has several fast-forward changes in a row, and syncs after each change is applied, but receives no acknowledgement of intermediate changes, sync still completes
+    // * "Server push" - if server receives several fast-forward changes in a row, and syncs after each change is applied, but receives no acknowledgement of intermediate changes, sync still completes
+    // * Sync succeeds on forests
+    // * Sync succeeds when both sides have changed heads
+    //
+    // * If messages are dropped or re-ordered on the network, sync still completes
+    // * If one side has strictly fewer commits than the other, and drops their doc, sync still completes
+    // * If one or both sides drops its sync state, sync still completes
+    //
+    // * If sync protocol signals it is done, docs are equal
+    // * If docs are equal, sync protocol signals it is done
+}
+
+#[cfg(test)]
+mod scenario_tests {
+    use crate::change::gen::gen_change;
+    use crate::rr_sync::{Message, State, SyncDoc};
+    use crate::{AutoCommit, Change};
+    use proptest::collection::vec;
+    use proptest::prelude::*;
+
+    use std::collections::{HashSet, VecDeque};
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+    struct ParticipantId(usize);
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+    struct MessageIndex(usize);
+
+    #[derive(Debug, Clone)]
+    enum SyncEvent {
+        RunParticipant {
+            participant: ParticipantId,
+        },
+        LocalChange {
+            participants: HashSet<ParticipantId>,
+            change: Change,
+        },
+        DeliverMessage {
+            index: MessageIndex,
+        },
+        DropMessage {
+            index: MessageIndex,
+        },
+        DeliverAndClearAllMessages {},
+        ResetSyncState {
+            participant: ParticipantId,
+        },
+        ResetDoc {
+            participant: ParticipantId,
+        },
+    }
+
+    #[derive(Debug, Clone)]
+    struct NetworkMessage {
+        to: ParticipantId,
+        content: Vec<u8>,
+    }
+
+    #[derive(Debug, Clone)]
+    struct SyncScenario {
+        initial_states: Vec<AutoCommit>,
+        participant_behaviors: Vec<ParticipantBehavior>,
+        events: Vec<SyncEvent>,
+    }
+
+    #[derive(Debug)]
+    struct Network {
+        messages: VecDeque<NetworkMessage>,
+        total_messages_delivered: usize,
+    }
+
+    #[derive(Debug, Clone)]
+    enum ParticipantBehavior {
+        ClientInitiated {
+            waiting_for_response: bool,
+            last_sent_message_index: Option<MessageIndex>,
+        },
+        ServerResponsive,
+    }
+
+    fn new_client_initiated_partipant() -> ParticipantBehavior {
+        ParticipantBehavior::ClientInitiated {
+            waiting_for_response: false,
+            last_sent_message_index: None,
+        }
+    }
+
+    #[derive(Debug)]
+    struct Participant {
+        doc: AutoCommit,
+        state: State,
+        behavior: ParticipantBehavior,
+    }
+
+    #[derive(Debug)]
+    struct SyncSimulation {
+        participants: [Participant; 2],
+        network: Network,
+        events: VecDeque<SyncEvent>,
+    }
+
+    impl Network {
+        fn new() -> Self {
+            Network {
+                messages: VecDeque::new(),
+                total_messages_delivered: 0,
+            }
+        }
+
+        fn send(&mut self, to: ParticipantId, content: Vec<u8>) -> MessageIndex {
+            self.messages.push_back(NetworkMessage { to, content });
+            MessageIndex(self.messages.len() - 1)
+        }
+
+        fn deliver_message(&mut self, MessageIndex(index): MessageIndex) -> Option<NetworkMessage> {
+            if index < self.messages.len() {
+                self.total_messages_delivered += 1;
+                Some(self.messages[index].clone())
+            } else {
+                None
+            }
+        }
+
+        fn drop_message(&mut self, MessageIndex(index): MessageIndex) -> Option<NetworkMessage> {
+            self.messages.remove(index)
+        }
+    }
+
+    impl SyncSimulation {
+        fn new(scenario: SyncScenario) -> Self {
+            let mut participants = scenario
+                .initial_states
+                .into_iter()
+                .zip(scenario.participant_behaviors.into_iter())
+                .map(|(doc, behavior)| Participant {
+                    doc,
+                    state: State::new(),
+                    behavior,
+                })
+                .collect::<Vec<_>>();
+
+            let participants = [participants.pop().unwrap(), participants.pop().unwrap()];
+
+            SyncSimulation {
+                participants,
+                network: Network::new(),
+                events: scenario.events.into(),
+            }
+        }
+
+        fn run(&mut self) {
+            while let Some(event) = self.events.pop_front() {
+                self.handle_event(event);
+            }
+
+            self.flush_network();
+        }
+
+        fn handle_event(&mut self, event: SyncEvent) {
+            match event {
+                SyncEvent::RunParticipant { participant } => {
+                    self.send_sync_message(participant, ParticipantId(1 - participant.0));
+                }
+                SyncEvent::LocalChange {
+                    participants,
+                    change,
+                } => {
+                    for &participant in &participants {
+                        let p = &mut self.participants[participant.0];
+                        p.doc
+                            .apply_changes(std::iter::once(change.clone()))
+                            .unwrap();
+                        self.handle_local_change(participant);
+                    }
+                }
+                SyncEvent::DeliverMessage { index } => {
+                    self.deliver_message(index);
+                }
+                SyncEvent::DropMessage { index } => {
+                    self.network.drop_message(index);
+                    self.handle_dropped_message(index);
+                }
+                SyncEvent::DeliverAndClearAllMessages {} => {
+                    self.flush_network();
+                },
+                SyncEvent::ResetSyncState { participant } => {
+                    self.participants[participant.0].state = State::new();
+                }
+                SyncEvent::ResetDoc { participant } => {
+                    self.participants[participant.0].doc = AutoCommit::new();
+                }
+            }
+        }
+
+        fn handle_local_change(&mut self, participant: ParticipantId) {
+            let p = &mut self.participants[participant.0];
+            match &mut p.behavior {
+                ParticipantBehavior::ClientInitiated {
+                    waiting_for_response,
+                    ..
+                } => {
+                    if !*waiting_for_response {
+                        self.send_sync_message(participant, ParticipantId(1 - participant.0));
+                    }
+                }
+                ParticipantBehavior::ServerResponsive => {
+                    // Server waits for client to initiate
+                }
+            }
+        }
+
+        fn send_sync_message(&mut self, from: ParticipantId, to: ParticipantId) -> bool {
+            let participant = &mut self.participants[from.0];
+            if let Some(msg) = participant
+                .doc
+                .rr_sync()
+                .generate_sync_message(&mut participant.state)
+            {
+                let index = self.network.send(to, msg.encode());
+                if let ParticipantBehavior::ClientInitiated {
+                    waiting_for_response,
+                    last_sent_message_index,
+                } = &mut participant.behavior
+                {
+                    *waiting_for_response = true;
+                    *last_sent_message_index = Some(index);
+                }
+                true
+            } else {
+                false
+            }
+        }
+
+        fn deliver_message(&mut self, index: MessageIndex) {
+            if let Some(NetworkMessage { to, content, .. }) = self.network.deliver_message(index) {
+                let participant = &mut self.participants[to.0];
+                let msg = Message::decode(&content).unwrap();
+                participant
+                    .doc
+                    .rr_sync()
+                    .receive_sync_message(&mut participant.state, msg)
+                    .unwrap();
+
+                match &mut participant.behavior {
+                    ParticipantBehavior::ClientInitiated {
+                        waiting_for_response,
+                        ..
+                    } => {
+                        *waiting_for_response = false;
+                        self.send_sync_message(to, ParticipantId(1 - to.0));
+                    }
+                    ParticipantBehavior::ServerResponsive => {
+                        self.send_sync_message(to, ParticipantId(1 - to.0));
+                    }
+                }
+            }
+        }
+
+        fn flush_network(&mut self) {
+            while !self.network.messages.is_empty() {
+                self.handle_event(SyncEvent::DeliverMessage {
+                    index: MessageIndex(0),
+                });
+                self.network.messages.pop_front();
+            }
+        }
+
+        fn handle_dropped_message(&mut self, index: MessageIndex) {
+            let participants_to_resend: Vec<_> = self
+                .participants
+                .iter_mut()
+                .enumerate()
+                .filter_map(|(i, participant)| {
+                    if let ParticipantBehavior::ClientInitiated {
+                        ref mut waiting_for_response,
+                        last_sent_message_index: ref mut last_sent_message_id,
+                    } = participant.behavior
+                    {
+                        if *last_sent_message_id == Some(index) {
+                            *last_sent_message_id = None;
+                            *waiting_for_response = false;
+                            Some(ParticipantId(i))
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+
+            for &participant_id in &participants_to_resend {
+                self.send_sync_message(participant_id, ParticipantId(1 - participant_id.0));
+            }
+        }
+
+        fn is_terminated(&self) -> bool {
+            self.participants.iter().all(|participant| {
+                let mut doc_clone = participant.doc.clone();
+                let mut state_clone = participant.state.clone();
+                let is_none = doc_clone
+                    .rr_sync()
+                    .generate_sync_message(&mut state_clone)
+                    .is_none();
+                is_none
+            })
+        }
+
+        fn are_docs_equal(&self) -> bool {
+            if self.participants.is_empty() {
+                return true;
+            }
+
+            let mut first_doc = self.participants[0].doc.clone();
+            let first_heads = first_doc.get_heads();
+            let first_missing_deps = first_doc.get_missing_deps(&first_heads);
+
+            self.participants.iter().all(|participant| {
+                let mut participant_doc = participant.doc.clone();
+                let heads = participant_doc.get_heads();
+                let missing_deps = participant_doc.get_missing_deps(&heads);
+                heads == first_heads && missing_deps == first_missing_deps
+            })
+        }
+    }
+
+    // Strategies
+
+    fn gen_initial_state() -> impl Strategy<Value = AutoCommit> {
+        vec(gen_change(), 0..10).prop_map(|changes| {
+            let mut doc = AutoCommit::new();
+            doc.apply_changes(changes).unwrap();
+            doc
+        })
+    }
+
+    prop_compose! {
+        fn gen_local_change(participant_count: usize)
+                           (participants in prop::collection::hash_set(0..participant_count, 1..=participant_count),
+                            change in gen_change())
+                           -> SyncEvent {
+            SyncEvent::LocalChange {
+                participants: participants.into_iter().map(ParticipantId).collect(),
+                change
+            }
+        }
+    }
+
+    prop_compose! {
+        fn gen_deliver_message(message_count: usize)
+                              (index in 0..message_count)
+                              -> SyncEvent {
+            SyncEvent::DeliverMessage { index: MessageIndex(index) }
+        }
+    }
+
+    fn gen_sync_event(
+        participant_count: usize,
+        message_count: usize,
+    ) -> impl Strategy<Value = SyncEvent> {
+        prop_oneof![
+            gen_local_change(participant_count),
+            gen_deliver_message(message_count),
+            (0..message_count).prop_map(|index| SyncEvent::DropMessage {
+                index: MessageIndex(index)
+            }),
+            (0..participant_count).prop_map(|p| SyncEvent::ResetSyncState {
+                participant: ParticipantId(p)
+            }),
+            (0..participant_count).prop_map(|p| SyncEvent::ResetDoc {
+                participant: ParticipantId(p)
+            }),
+        ]
+    }
+
+    fn test_sync_eventually_completes(scenario: SyncScenario) -> SyncSimulation {
+        let mut simulation = SyncSimulation::new(scenario);
+        simulation.run();
+        assert!(simulation.is_terminated());
+        assert!(simulation.are_docs_equal());
+        simulation
+    }
+
+    #[test]
+    fn test_sync_empty_docs() {
+        let scenario = SyncScenario {
+            initial_states: vec![AutoCommit::new(), AutoCommit::new()],
+            participant_behaviors: vec![new_client_initiated_partipant(), ParticipantBehavior::ServerResponsive],
+            events: vec![
+                SyncEvent::RunParticipant { participant: ParticipantId(0) }
+            ],
+        };
+        let simulation = test_sync_eventually_completes(scenario);
+        assert_eq!(simulation.network.total_messages_delivered, 2);
     }
 }
