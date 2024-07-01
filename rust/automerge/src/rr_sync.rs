@@ -1327,11 +1327,12 @@ mod tests {
 mod scenario_tests {
     use crate::change::gen::gen_change;
     use crate::rr_sync::{Message, State, SyncDoc};
-    use crate::{AutoCommit, Change};
+    use crate::transaction::Transactable;
+    use crate::{AutoCommit, ReadDoc, ROOT};
     use proptest::collection::vec;
     use proptest::prelude::*;
 
-    use std::collections::{HashSet, VecDeque};
+    use std::collections::VecDeque;
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
     struct ParticipantId(usize);
@@ -1345,8 +1346,8 @@ mod scenario_tests {
             participant: ParticipantId,
         },
         LocalChange {
-            participants: HashSet<ParticipantId>,
-            change: Change,
+            participant: ParticipantId,
+            change_type: ChangeType,
         },
         DeliverMessage {
             index: MessageIndex,
@@ -1361,6 +1362,17 @@ mod scenario_tests {
         ResetDoc {
             participant: ParticipantId,
         },
+    }
+
+    #[derive(Debug, Clone)]
+    enum ChangeType {
+        // Add a new branch from the root commit
+        NewBranch,
+        // Add a new commit at get_heads()[i]
+        // Use a usize instead of a ChangeHash to make it easier to generate ChangeTypes
+        ExistingHead(usize),
+        // Add a new commit merging get_heads()[i] and get_heads()[j]
+        Merge(usize, usize),
     }
 
     #[derive(Debug, Clone)]
@@ -1465,8 +1477,21 @@ mod scenario_tests {
             while let Some(event) = self.events.pop_front() {
                 self.handle_event(event);
             }
+        }
+
+        fn run_with_eventually_reliable_network(&mut self) {
+            while let Some(event) = self.events.pop_front() {
+                self.handle_event(event);
+            }
 
             self.flush_network();
+        }
+
+        fn run_with_reliable_network(&mut self) {
+            while let Some(event) = self.events.pop_front() {
+                self.handle_event(event);
+                self.flush_network();
+            }
         }
 
         fn handle_event(&mut self, event: SyncEvent) {
@@ -1475,16 +1500,36 @@ mod scenario_tests {
                     self.send_sync_message(participant, ParticipantId(1 - participant.0));
                 }
                 SyncEvent::LocalChange {
-                    participants,
-                    change,
+                    participant,
+                    change_type,
                 } => {
-                    for &participant in &participants {
-                        let p = &mut self.participants[participant.0];
-                        p.doc
-                            .apply_changes(std::iter::once(change.clone()))
-                            .unwrap();
-                        self.handle_local_change(participant);
-                    }
+                    let p = &mut self.participants[participant.0];
+                    let maybe_work_doc = match change_type {
+                        ChangeType::NewBranch => Some(p.doc.fork_at(&[]).unwrap()),
+                        ChangeType::ExistingHead(i) => p
+                            .doc
+                            .get_heads()
+                            .get(i)
+                            .map(|head| p.doc.fork_at(&[*head]).unwrap()),
+                        ChangeType::Merge(i, j) => p.doc.get_heads().get(i).and_then(|head1| {
+                            p.doc
+                                .get_heads()
+                                .get(j)
+                                .map(|head2| p.doc.fork_at(&[*head1, *head2]).unwrap())
+                        }),
+                    };
+                    maybe_work_doc.map(|mut doc| {
+                        let value = {
+                            // Grab the first head hash as a dummy value
+                            doc.get_heads()
+                                .get(0)
+                                .map(|head| head.to_string())
+                                .unwrap_or_default()
+                        };
+                        doc.put(&ROOT, "key", value).unwrap();
+                        p.doc.merge(&mut doc).unwrap();
+                    });
+                    self.handle_local_change(participant);
                 }
                 SyncEvent::DeliverMessage { index } => {
                     self.deliver_message(index);
@@ -1635,9 +1680,33 @@ mod scenario_tests {
                 heads == first_heads && missing_deps == first_missing_deps
             })
         }
+
+        fn dump(&self) {
+            println!(
+                "Delivered messages: {}",
+                self.network.total_messages_delivered
+            );
+
+            for (i, participant) in self.participants.iter().enumerate() {
+                println!("Participant {}", i);
+                println!("\tHeads: {:?}", participant.doc.clone().get_heads());
+            }
+            println!();
+
+            let mut doc = self.participants[0].doc.clone();
+            let heads = doc.get_heads();
+            for head in heads {
+                let (value, _) = doc.get_at(&ROOT, "key", &[head]).unwrap().unwrap();
+                println!("Head: {:?}\n\tValue at 'key': {:?}\n", head, value);
+            }
+        }
     }
 
     // Strategies
+
+    fn gen_participant_id() -> impl Strategy<Value = ParticipantId> {
+        prop_oneof![Just(0usize), Just(1usize)].prop_map(ParticipantId)
+    }
 
     fn gen_initial_state() -> impl Strategy<Value = AutoCommit> {
         vec(gen_change(), 0..10).prop_map(|changes| {
@@ -1647,15 +1716,29 @@ mod scenario_tests {
         })
     }
 
-    prop_compose! {
-        fn gen_local_change(participant_count: usize)
-                           (participants in prop::collection::hash_set(0..participant_count, 1..=participant_count),
-                            change in gen_change())
-                           -> SyncEvent {
+    fn gen_change_type() -> impl Strategy<Value = ChangeType> {
+        let bounded_usize = 0..=3usize;
+        prop_oneof![
+            Just(ChangeType::NewBranch),
+            bounded_usize.clone().prop_map(ChangeType::ExistingHead),
+            (bounded_usize.clone(), bounded_usize).prop_map(|(i, j)| ChangeType::Merge(i, j))
+        ]
+    }
+
+    fn gen_local_change() -> impl Strategy<Value = SyncEvent> {
+        (gen_participant_id(), gen_change_type()).prop_map(|(participant, change_type)| {
             SyncEvent::LocalChange {
-                participants: participants.into_iter().map(ParticipantId).collect(),
-                change
+                participant,
+                change_type,
             }
+        })
+    }
+
+    prop_compose! {
+        fn gen_run_participant(participant_count: usize)
+                              (participant in 0..participant_count)
+                              -> SyncEvent {
+            SyncEvent::RunParticipant { participant: ParticipantId(participant) }
         }
     }
 
@@ -1672,7 +1755,8 @@ mod scenario_tests {
         message_count: usize,
     ) -> impl Strategy<Value = SyncEvent> {
         prop_oneof![
-            gen_local_change(participant_count),
+            gen_local_change(),
+            gen_run_participant(participant_count),
             gen_deliver_message(message_count),
             (0..message_count).prop_map(|index| SyncEvent::DropMessage {
                 index: MessageIndex(index)
@@ -1686,13 +1770,92 @@ mod scenario_tests {
         ]
     }
 
+    fn gen_sync_event_reliable(participant_count: usize) -> impl Strategy<Value = SyncEvent> {
+        prop_oneof![gen_local_change(), gen_run_participant(participant_count),]
+    }
+
+    fn gen_reliable_network_scenario(max_events: usize) -> impl Strategy<Value = SyncScenario> {
+        (
+            vec(gen_initial_state(), 2..=2),
+            Just(vec![
+                new_client_initiated_partipant(),
+                ParticipantBehavior::ServerResponsive,
+            ]),
+            vec(
+                gen_sync_event_reliable(2), // Use 2 for participant_count
+                1..=max_events,
+            ),
+        )
+            .prop_map(
+                |(initial_states, participant_behaviors, events)| SyncScenario {
+                    initial_states,
+                    participant_behaviors,
+                    events: ensure_client_runs_at_end(ParticipantId(0), events),
+                },
+            )
+    }
+
+    fn gen_unreliable_network_scenario(max_events: usize) -> impl Strategy<Value = SyncScenario> {
+        (
+            vec(gen_initial_state(), 2..=2),
+            Just(vec![
+                new_client_initiated_partipant(),
+                ParticipantBehavior::ServerResponsive,
+            ]),
+            vec(
+                gen_sync_event(2, max_events), // Use 2 for participant_count
+                1..=max_events,
+            ),
+        )
+            .prop_map(
+                |(initial_states, participant_behaviors, events)| SyncScenario {
+                    initial_states,
+                    participant_behaviors,
+                    events: ensure_client_runs_at_end(ParticipantId(0), events),
+                },
+            )
+    }
+
+    // Proptest will generate scenarios where the client gets changes after the last time it tries to sync
+    fn ensure_client_runs_at_end(
+        participant_id: ParticipantId,
+        mut events: Vec<SyncEvent>,
+    ) -> Vec<SyncEvent> {
+        events = events.clone();
+        events.push(SyncEvent::RunParticipant {
+            participant: participant_id,
+        });
+
+        events
+    }
+
+    // generic tests
+
     fn test_sync_eventually_completes(scenario: SyncScenario) -> SyncSimulation {
+        let mut simulation = SyncSimulation::new(scenario);
+        simulation.run_with_eventually_reliable_network();
+        assert!(simulation.is_terminated());
+        assert!(simulation.are_docs_equal());
+        simulation
+    }
+
+    fn test_sync_completes_on_reliable_network(scenario: SyncScenario) -> SyncSimulation {
+        let mut simulation = SyncSimulation::new(scenario);
+        simulation.run_with_reliable_network();
+        assert!(simulation.is_terminated());
+        assert!(simulation.are_docs_equal());
+        simulation
+    }
+
+    fn test_sync_completes_without_network_flush(scenario: SyncScenario) -> SyncSimulation {
         let mut simulation = SyncSimulation::new(scenario);
         simulation.run();
         assert!(simulation.is_terminated());
         assert!(simulation.are_docs_equal());
         simulation
     }
+
+    // Tests
 
     #[test]
     fn test_sync_empty_docs() {
@@ -1708,5 +1871,281 @@ mod scenario_tests {
         };
         let simulation = test_sync_eventually_completes(scenario);
         assert_eq!(simulation.network.total_messages_delivered, 2);
+    }
+
+    #[test]
+    fn test_sync_empty_docs_with_manual_flush() {
+        let scenario = SyncScenario {
+            initial_states: vec![AutoCommit::new(), AutoCommit::new()],
+            participant_behaviors: vec![
+                new_client_initiated_partipant(),
+                ParticipantBehavior::ServerResponsive,
+            ],
+            events: vec![
+                SyncEvent::RunParticipant {
+                    participant: ParticipantId(0),
+                },
+                SyncEvent::DeliverAndClearAllMessages {},
+            ],
+        };
+        let simulation = test_sync_completes_without_network_flush(scenario);
+        assert_eq!(simulation.network.total_messages_delivered, 2);
+    }
+
+    #[test]
+    fn test_sync_empty_docs_fully_reliable() {
+        let scenario = SyncScenario {
+            initial_states: vec![AutoCommit::new(), AutoCommit::new()],
+            participant_behaviors: vec![
+                new_client_initiated_partipant(),
+                ParticipantBehavior::ServerResponsive,
+            ],
+            events: vec![SyncEvent::RunParticipant {
+                participant: ParticipantId(0),
+            }],
+        };
+        let simulation = test_sync_completes_on_reliable_network(scenario);
+        assert_eq!(simulation.network.total_messages_delivered, 2);
+    }
+
+    #[test]
+    fn test_sync_empty_docs_do_not_sync_without_network() {
+        let scenario = SyncScenario {
+            initial_states: vec![AutoCommit::new(), AutoCommit::new()],
+            participant_behaviors: vec![
+                new_client_initiated_partipant(),
+                ParticipantBehavior::ServerResponsive,
+            ],
+            events: vec![SyncEvent::RunParticipant {
+                participant: ParticipantId(0),
+            }],
+        };
+
+        let mut simulation = SyncSimulation::new(scenario);
+        simulation.run();
+        assert!(!simulation.is_terminated());
+    }
+
+    #[test]
+    fn test_sync_one_change_on_client() {
+        let scenario = SyncScenario {
+            initial_states: vec![AutoCommit::new(), AutoCommit::new()],
+            participant_behaviors: vec![
+                new_client_initiated_partipant(),
+                ParticipantBehavior::ServerResponsive,
+            ],
+            events: vec![
+                SyncEvent::LocalChange {
+                    participant: ParticipantId(0),
+                    change_type: ChangeType::NewBranch,
+                },
+                SyncEvent::RunParticipant {
+                    participant: ParticipantId(0),
+                },
+            ],
+        };
+        let _ = test_sync_eventually_completes(scenario);
+    }
+
+    #[test]
+    fn test_sync_one_change_on_server() {
+        let scenario = SyncScenario {
+            initial_states: vec![AutoCommit::new(), AutoCommit::new()],
+            participant_behaviors: vec![
+                new_client_initiated_partipant(),
+                ParticipantBehavior::ServerResponsive,
+            ],
+            events: vec![
+                SyncEvent::LocalChange {
+                    participant: ParticipantId(1),
+                    change_type: ChangeType::NewBranch,
+                },
+                SyncEvent::RunParticipant {
+                    participant: ParticipantId(0),
+                },
+            ],
+        };
+        let _ = test_sync_eventually_completes(scenario);
+    }
+
+    #[test]
+    fn test_sync_with_a_flush() {
+        let scenario = SyncScenario {
+            initial_states: vec![AutoCommit::new(), AutoCommit::new()],
+            participant_behaviors: vec![
+                new_client_initiated_partipant(),
+                ParticipantBehavior::ServerResponsive,
+            ],
+            events: vec![
+                SyncEvent::LocalChange {
+                    participant: ParticipantId(1),
+                    change_type: ChangeType::NewBranch,
+                },
+                SyncEvent::RunParticipant {
+                    participant: ParticipantId(0),
+                },
+                SyncEvent::DeliverAndClearAllMessages {},
+            ],
+        };
+        let _ = test_sync_eventually_completes(scenario);
+    }
+
+    #[test]
+    fn test_sync_a_merge() {
+        let scenario = SyncScenario {
+            initial_states: vec![AutoCommit::new(), AutoCommit::new()],
+            participant_behaviors: vec![
+                new_client_initiated_partipant(),
+                ParticipantBehavior::ServerResponsive,
+            ],
+            events: vec![
+                SyncEvent::LocalChange {
+                    participant: ParticipantId(0),
+                    change_type: ChangeType::NewBranch,
+                },
+                SyncEvent::LocalChange {
+                    participant: ParticipantId(0),
+                    change_type: ChangeType::ExistingHead(0),
+                },
+                SyncEvent::LocalChange {
+                    participant: ParticipantId(0),
+                    change_type: ChangeType::NewBranch,
+                },
+                SyncEvent::LocalChange {
+                    participant: ParticipantId(0),
+                    change_type: ChangeType::ExistingHead(1),
+                },
+                SyncEvent::LocalChange {
+                    participant: ParticipantId(0),
+                    change_type: ChangeType::Merge(0, 1),
+                },
+                SyncEvent::RunParticipant {
+                    participant: ParticipantId(0),
+                },
+            ],
+        };
+        let _ = test_sync_eventually_completes(scenario);
+    }
+
+    #[test]
+    fn test_dropping_a_message() {
+        let scenario = SyncScenario {
+            initial_states: vec![AutoCommit::new(), AutoCommit::new()],
+            participant_behaviors: vec![
+                new_client_initiated_partipant(),
+                ParticipantBehavior::ServerResponsive,
+            ],
+            events: vec![
+                SyncEvent::LocalChange {
+                    participant: ParticipantId(0),
+                    change_type: ChangeType::NewBranch,
+                },
+                SyncEvent::LocalChange {
+                    participant: ParticipantId(0),
+                    change_type: ChangeType::ExistingHead(0),
+                },
+                SyncEvent::LocalChange {
+                    participant: ParticipantId(0),
+                    change_type: ChangeType::NewBranch,
+                },
+                SyncEvent::LocalChange {
+                    participant: ParticipantId(0),
+                    change_type: ChangeType::ExistingHead(1),
+                },
+                SyncEvent::LocalChange {
+                    participant: ParticipantId(0),
+                    change_type: ChangeType::Merge(0, 1),
+                },
+                SyncEvent::RunParticipant {
+                    participant: ParticipantId(0),
+                },
+                SyncEvent::RunParticipant {
+                    participant: ParticipantId(1),
+                },
+                SyncEvent::DeliverMessage {
+                    index: MessageIndex(0),
+                },
+                SyncEvent::DropMessage {
+                    index: MessageIndex(1),
+                },
+                SyncEvent::DeliverMessage {
+                    index: MessageIndex(3),
+                },
+            ],
+        };
+        let _ = test_sync_eventually_completes(scenario);
+    }
+
+    #[test]
+    fn test_sync_with_server_crash_after_first_message() {
+        let scenario = SyncScenario {
+            initial_states: vec![AutoCommit::new(), AutoCommit::new()],
+            participant_behaviors: vec![
+                new_client_initiated_partipant(),
+                ParticipantBehavior::ServerResponsive,
+            ],
+            events: vec![
+                SyncEvent::LocalChange {
+                    participant: ParticipantId(0),
+                    change_type: ChangeType::NewBranch,
+                },
+                SyncEvent::RunParticipant {
+                    participant: ParticipantId(0),
+                },
+                SyncEvent::DeliverMessage {
+                    index: MessageIndex(0),
+                },
+                SyncEvent::ResetSyncState {
+                    participant: ParticipantId(1),
+                },
+                SyncEvent::ResetDoc {
+                    participant: ParticipantId(1),
+                },
+            ],
+        };
+        let simulation = test_sync_eventually_completes(scenario);
+        simulation.dump();
+    }
+
+    // A few proptests
+    proptest! {
+        #![proptest_config(ProptestConfig {
+            cases: 50,
+            max_shrink_iters: 10000,
+            .. ProptestConfig::default()
+        })]
+        #[test]
+        fn test_sync_protocol_reliable(scenario in gen_reliable_network_scenario(20)) {
+            let mut simulation = SyncSimulation::new(scenario);
+            simulation.run_with_reliable_network();
+
+            prop_assert!(simulation.is_terminated(), "Sync did not terminate");
+            prop_assert!(simulation.are_docs_equal(), "Docs are not equal after sync");
+        }
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig {
+            cases: 5,
+            max_shrink_iters: 10000,
+            .. ProptestConfig::default()
+        })]
+        #[test]
+        fn test_sync_protocol_eventually_reliable(scenario in gen_reliable_network_scenario(20)) {
+            let mut simulation = SyncSimulation::new(scenario);
+            simulation.run_with_reliable_network();
+
+            prop_assert!(simulation.is_terminated(), "Sync did not terminate");
+            prop_assert!(simulation.are_docs_equal(), "Docs are not equal after sync");
+        }
+
+        #[test]
+        fn test_sync_protocol_unreliable(scenario in gen_unreliable_network_scenario(5)) {
+            let mut simulation = SyncSimulation::new(scenario);
+            simulation.run_with_eventually_reliable_network();
+
+            prop_assert!(simulation.is_terminated(), "Sync did not terminate");
+            prop_assert!(simulation.are_docs_equal(), "Docs are not equal after sync");
+        }
     }
 }
