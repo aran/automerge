@@ -1664,7 +1664,22 @@ mod scenario_tests {
             })
         }
 
-        fn are_docs_equal(&self) -> bool {
+        fn are_docs_heads_equal(&self) -> bool {
+            if self.participants.is_empty() {
+                return true;
+            }
+
+            let mut first_doc = self.participants[0].doc.clone();
+            let first_heads = first_doc.get_heads();
+
+            self.participants.iter().all(|participant| {
+                let mut participant_doc = participant.doc.clone();
+                let heads = participant_doc.get_heads();
+                heads == first_heads
+            })
+        }
+
+        fn are_docs_missing_deps_equal(&self) -> bool {
             if self.participants.is_empty() {
                 return true;
             }
@@ -1677,7 +1692,7 @@ mod scenario_tests {
                 let mut participant_doc = participant.doc.clone();
                 let heads = participant_doc.get_heads();
                 let missing_deps = participant_doc.get_missing_deps(&heads);
-                heads == first_heads && missing_deps == first_missing_deps
+                missing_deps == first_missing_deps
             })
         }
 
@@ -1831,27 +1846,30 @@ mod scenario_tests {
 
     // generic tests
 
+    fn assert_sync_correctness(simulation: &SyncSimulation) {
+        assert!(simulation.is_terminated());
+        assert!(simulation.are_docs_heads_equal());
+        assert!(simulation.are_docs_missing_deps_equal());
+    }
+
     fn test_sync_eventually_completes(scenario: SyncScenario) -> SyncSimulation {
         let mut simulation = SyncSimulation::new(scenario);
         simulation.run_with_eventually_reliable_network();
-        assert!(simulation.is_terminated());
-        assert!(simulation.are_docs_equal());
+        assert_sync_correctness(&simulation);
         simulation
     }
 
     fn test_sync_completes_on_reliable_network(scenario: SyncScenario) -> SyncSimulation {
         let mut simulation = SyncSimulation::new(scenario);
         simulation.run_with_reliable_network();
-        assert!(simulation.is_terminated());
-        assert!(simulation.are_docs_equal());
+        assert_sync_correctness(&simulation);
         simulation
     }
 
     fn test_sync_completes_without_network_flush(scenario: SyncScenario) -> SyncSimulation {
         let mut simulation = SyncSimulation::new(scenario);
         simulation.run();
-        assert!(simulation.is_terminated());
-        assert!(simulation.are_docs_equal());
+        assert_sync_correctness(&simulation);
         simulation
     }
 
@@ -2118,9 +2136,10 @@ mod scenario_tests {
         fn test_sync_protocol_reliable(scenario in gen_reliable_network_scenario(20)) {
             let mut simulation = SyncSimulation::new(scenario);
             simulation.run_with_reliable_network();
-
             prop_assert!(simulation.is_terminated(), "Sync did not terminate");
-            prop_assert!(simulation.are_docs_equal(), "Docs are not equal after sync");
+            prop_assert!(simulation.are_docs_heads_equal(), "Docs heads are not equal after sync");
+            prop_assert!(simulation.are_docs_missing_deps_equal(), "Docs missing deps are not equal after sync");
+
         }
     }
 
@@ -2136,7 +2155,8 @@ mod scenario_tests {
             simulation.run_with_reliable_network();
 
             prop_assert!(simulation.is_terminated(), "Sync did not terminate");
-            prop_assert!(simulation.are_docs_equal(), "Docs are not equal after sync");
+            prop_assert!(simulation.are_docs_heads_equal(), "Docs heads are not equal after sync");
+            prop_assert!(simulation.are_docs_missing_deps_equal(), "Docs missing deps are not equal after sync");
         }
 
         #[test]
@@ -2145,7 +2165,8 @@ mod scenario_tests {
             simulation.run_with_eventually_reliable_network();
 
             prop_assert!(simulation.is_terminated(), "Sync did not terminate");
-            prop_assert!(simulation.are_docs_equal(), "Docs are not equal after sync");
+            prop_assert!(simulation.are_docs_heads_equal(), "Docs heads are not equal after sync");
+            prop_assert!(simulation.are_docs_missing_deps_equal(), "Docs missing deps are not equal after sync");
         }
     }
 }
