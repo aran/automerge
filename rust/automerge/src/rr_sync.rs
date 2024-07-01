@@ -1529,7 +1529,6 @@ mod scenario_tests {
                         doc.put(&ROOT, "key", value).unwrap();
                         p.doc.merge(&mut doc).unwrap();
                     });
-                    self.handle_local_change(participant);
                 }
                 SyncEvent::DeliverMessage { index } => {
                     self.deliver_message(index);
@@ -1546,23 +1545,6 @@ mod scenario_tests {
                 }
                 SyncEvent::ResetDoc { participant } => {
                     self.participants[participant.0].doc = AutoCommit::new();
-                }
-            }
-        }
-
-        fn handle_local_change(&mut self, participant: ParticipantId) {
-            let p = &mut self.participants[participant.0];
-            match &mut p.behavior {
-                ParticipantBehavior::ClientInitiated {
-                    waiting_for_response,
-                    ..
-                } => {
-                    if !*waiting_for_response {
-                        self.send_sync_message(participant, ParticipantId(1 - participant.0));
-                    }
-                }
-                ParticipantBehavior::ServerResponsive => {
-                    // Server waits for client to initiate
                 }
             }
         }
