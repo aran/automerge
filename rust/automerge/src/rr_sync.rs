@@ -1777,7 +1777,7 @@ mod scenario_tests {
                 ParticipantBehavior::ServerResponsive,
             ]),
             vec(
-                gen_sync_event_reliable(2), // Use 2 for participant_count
+                gen_sync_event_reliable(2),
                 1..=max_events,
             ),
         )
@@ -1798,7 +1798,7 @@ mod scenario_tests {
                 ParticipantBehavior::ServerResponsive,
             ]),
             vec(
-                gen_sync_event(2, max_events), // Use 2 for participant_count
+                gen_sync_event(2, max_events),
                 1..=max_events,
             ),
         )
