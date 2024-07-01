@@ -1587,12 +1587,10 @@ mod scenario_tests {
                         ..
                     } => {
                         *waiting_for_response = false;
-                        self.send_sync_message(to, ParticipantId(1 - to.0));
                     }
-                    ParticipantBehavior::ServerResponsive => {
-                        self.send_sync_message(to, ParticipantId(1 - to.0));
-                    }
+                    ParticipantBehavior::ServerResponsive => {}
                 }
+                self.send_sync_message(to, ParticipantId(1 - to.0));
             }
         }
 
