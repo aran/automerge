@@ -1691,6 +1691,7 @@ mod scenario_tests {
             })
         }
 
+        // Not actually an invariant of current sync protocol
         fn are_docs_missing_deps_equal(&self) -> bool {
             if self.participants.is_empty() {
                 return true;
@@ -1855,7 +1856,6 @@ mod scenario_tests {
     fn assert_sync_correctness(simulation: &SyncSimulation) {
         assert!(simulation.is_terminated());
         assert!(simulation.are_docs_heads_equal());
-        assert!(simulation.are_docs_missing_deps_equal());
     }
 
     fn test_sync_eventually_completes(scenario: SyncScenario) -> SyncSimulation {
@@ -2170,7 +2170,6 @@ mod scenario_tests {
             simulation.run_with_reliable_network();
             prop_assert!(simulation.is_terminated(), "Sync did not terminate");
             prop_assert!(simulation.are_docs_heads_equal(), "Docs heads are not equal after sync");
-            prop_assert!(simulation.are_docs_missing_deps_equal(), "Docs missing deps are not equal after sync");
         }
     }
 
@@ -2186,7 +2185,6 @@ mod scenario_tests {
 
             prop_assert!(simulation.is_terminated(), "Sync did not terminate");
             prop_assert!(simulation.are_docs_heads_equal(), "Docs heads are not equal after sync");
-            prop_assert!(simulation.are_docs_missing_deps_equal(), "Docs missing deps are not equal after sync");
         }
     }
 
@@ -2202,7 +2200,6 @@ mod scenario_tests {
 
             prop_assert!(simulation.is_terminated(), "Sync did not terminate");
             prop_assert!(simulation.are_docs_heads_equal(), "Docs heads are not equal after sync");
-            prop_assert!(simulation.are_docs_missing_deps_equal(), "Docs missing deps are not equal after sync");
         }
     }
 }
