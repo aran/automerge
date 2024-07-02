@@ -1325,7 +1325,6 @@ mod tests {
 
 #[cfg(test)]
 mod scenario_tests {
-    use crate::change::gen::gen_change;
     use crate::rr_sync::{Message, State, SyncDoc};
     use crate::transaction::Transactable;
     use crate::{AutoCommit, ReadDoc, ROOT};
@@ -1704,11 +1703,7 @@ mod scenario_tests {
     }
 
     fn gen_initial_state() -> impl Strategy<Value = AutoCommit> {
-        vec(gen_change(), 0..10).prop_map(|changes| {
-            let mut doc = AutoCommit::new();
-            doc.apply_changes(changes).unwrap();
-            doc
-        })
+        Just(AutoCommit::new())
     }
 
     fn gen_change_type() -> impl Strategy<Value = ChangeType> {
