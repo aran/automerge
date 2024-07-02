@@ -2161,25 +2161,25 @@ mod scenario_tests {
     // A few proptests
     proptest! {
         #![proptest_config(ProptestConfig {
-            cases: 2,
+            cases: 1000,
             .. ProptestConfig::default()
         })]
-        // #[test]
+        #[test]
         fn test_sync_protocol_reliable(scenario in gen_reliable_network_scenario(5)) {
             let mut simulation = SyncSimulation::new(scenario);
             simulation.run_with_reliable_network();
             prop_assert!(simulation.is_terminated(), "Sync did not terminate");
             prop_assert!(simulation.are_docs_heads_equal(), "Docs heads are not equal after sync");
-            // prop_assert!(simulation.are_docs_missing_deps_equal(), "Docs missing deps are not equal after sync");
+            prop_assert!(simulation.are_docs_missing_deps_equal(), "Docs missing deps are not equal after sync");
         }
     }
 
     proptest! {
         #![proptest_config(ProptestConfig {
-            cases: 5,
+            cases: 1000,
             .. ProptestConfig::default()
         })]
-        // #[test]
+        #[test]
         fn test_sync_protocol_eventually_reliable(scenario in gen_reliable_network_scenario(20)) {
             let mut simulation = SyncSimulation::new(scenario);
             simulation.run_with_reliable_network();
