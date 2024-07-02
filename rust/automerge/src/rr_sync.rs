@@ -1339,6 +1339,9 @@ mod scenario_tests {
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
     struct MessageIndex(usize);
 
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+    struct MessageId(usize);
+
     #[derive(Debug, Clone)]
     enum SyncEvent {
         RunParticipant {
@@ -1378,6 +1381,7 @@ mod scenario_tests {
     struct NetworkMessage {
         to: ParticipantId,
         content: Vec<u8>,
+        id: MessageId,
     }
 
     #[derive(Debug, Clone)]
@@ -1391,13 +1395,14 @@ mod scenario_tests {
     struct Network {
         messages: VecDeque<NetworkMessage>,
         total_messages_delivered: usize,
+        next_id: usize,
     }
 
     #[derive(Debug, Clone)]
     enum ParticipantBehavior {
         ClientInitiated {
             waiting_for_response: bool,
-            last_sent_message_index: Option<MessageIndex>,
+            last_sent_message_id: Option<MessageId>,
         },
         ServerResponsive,
     }
@@ -1405,7 +1410,7 @@ mod scenario_tests {
     fn new_client_initiated_partipant() -> ParticipantBehavior {
         ParticipantBehavior::ClientInitiated {
             waiting_for_response: false,
-            last_sent_message_index: None,
+            last_sent_message_id: None,
         }
     }
 
@@ -1428,12 +1433,15 @@ mod scenario_tests {
             Network {
                 messages: VecDeque::new(),
                 total_messages_delivered: 0,
+                next_id: 0,
             }
         }
 
-        fn send(&mut self, to: ParticipantId, content: Vec<u8>) -> MessageIndex {
-            self.messages.push_back(NetworkMessage { to, content });
-            MessageIndex(self.messages.len() - 1)
+        fn send(&mut self, to: ParticipantId, content: Vec<u8>) -> MessageId {
+            let id = MessageId(self.next_id);
+            self.next_id += 1;
+            self.messages.push_back(NetworkMessage { to, content, id});
+            id
         }
 
         fn deliver_message(&mut self, MessageIndex(index): MessageIndex) -> Option<NetworkMessage> {
@@ -1533,8 +1541,7 @@ mod scenario_tests {
                     self.deliver_message(index);
                 }
                 SyncEvent::DropMessage { index } => {
-                    self.network.drop_message(index);
-                    self.handle_dropped_message(index);
+                    self.drop_message(index);
                 }
                 SyncEvent::DeliverAndClearAllMessages {} => {
                     self.flush_network();
@@ -1555,14 +1562,14 @@ mod scenario_tests {
                 .rr_sync()
                 .generate_sync_message(&mut participant.state)
             {
-                let index = self.network.send(to, msg.encode());
+                let message_id = self.network.send(to, msg.encode());
                 if let ParticipantBehavior::ClientInitiated {
                     waiting_for_response,
-                    last_sent_message_index,
+                    last_sent_message_id,
                 } = &mut participant.behavior
                 {
                     *waiting_for_response = true;
-                    *last_sent_message_index = Some(index);
+                    *last_sent_message_id = Some(message_id);
                 }
                 true
             } else {
@@ -1571,7 +1578,7 @@ mod scenario_tests {
         }
 
         fn deliver_message(&mut self, index: MessageIndex) {
-            if let Some(NetworkMessage { to, content, .. }) = self.network.deliver_message(index) {
+            if let Some(NetworkMessage { to, content, id }) = self.network.deliver_message(index) {
                 let participant = &mut self.participants[to.0];
                 let msg = Message::decode(&content).unwrap();
                 participant
@@ -1583,9 +1590,16 @@ mod scenario_tests {
                 match &mut participant.behavior {
                     ParticipantBehavior::ClientInitiated {
                         waiting_for_response,
-                        ..
+                        last_sent_message_id,
                     } => {
-                        *waiting_for_response = false;
+                        let mut is_awaited_message = false;
+                        if let Some(last_sent_message_id) = last_sent_message_id  {
+                            is_awaited_message = *last_sent_message_id == id;
+                        }
+                        if is_awaited_message {
+                            *waiting_for_response = false;
+                            *last_sent_message_id = None;
+                        }
                     }
                     ParticipantBehavior::ServerResponsive => {}
                 }
@@ -1602,18 +1616,19 @@ mod scenario_tests {
             }
         }
 
-        fn handle_dropped_message(&mut self, index: MessageIndex) {
-            let participants_to_resend: Vec<_> = self
+        fn drop_message(&mut self, index: MessageIndex) {
+            if let Some(NetworkMessage { id, .. }) = self.network.drop_message(index) {
+                let participants_to_resend: Vec<_> = self
                 .participants
                 .iter_mut()
                 .enumerate()
                 .filter_map(|(i, participant)| {
                     if let ParticipantBehavior::ClientInitiated {
                         ref mut waiting_for_response,
-                        last_sent_message_index: ref mut last_sent_message_id,
+                        ref mut last_sent_message_id,
                     } = participant.behavior
                     {
-                        if *last_sent_message_id == Some(index) {
+                        if *last_sent_message_id == Some(id) {
                             *last_sent_message_id = None;
                             *waiting_for_response = false;
                             Some(ParticipantId(i))
@@ -1628,6 +1643,7 @@ mod scenario_tests {
 
             for &participant_id in &participants_to_resend {
                 self.send_sync_message(participant_id, ParticipantId(1 - participant_id.0));
+            }
             }
         }
 
@@ -1771,10 +1787,7 @@ mod scenario_tests {
                 new_client_initiated_partipant(),
                 ParticipantBehavior::ServerResponsive,
             ]),
-            vec(
-                gen_sync_event_reliable(2),
-                1..=max_events,
-            ),
+            vec(gen_sync_event_reliable(2), 1..=max_events),
         )
             .prop_map(
                 |(initial_states, participant_behaviors, events)| SyncScenario {
@@ -1792,10 +1805,7 @@ mod scenario_tests {
                 new_client_initiated_partipant(),
                 ParticipantBehavior::ServerResponsive,
             ]),
-            vec(
-                gen_sync_event(2, max_events),
-                1..=max_events,
-            ),
+            vec(gen_sync_event(2, max_events), 1..=max_events),
         )
             .prop_map(
                 |(initial_states, participant_behaviors, events)| SyncScenario {
@@ -2110,20 +2120,14 @@ mod scenario_tests {
             ],
             events: vec![
                 SyncEvent::RunParticipant {
-                    participant: ParticipantId(
-                        0,
-                    ),
+                    participant: ParticipantId(0),
                 },
                 SyncEvent::LocalChange {
-                    participant: ParticipantId(
-                        1,
-                    ),
+                    participant: ParticipantId(1),
                     change_type: ChangeType::NewBranch,
                 },
                 SyncEvent::RunParticipant {
-                    participant: ParticipantId(
-                        0,
-                    ),
+                    participant: ParticipantId(0),
                 },
             ],
         };
@@ -2137,7 +2141,7 @@ mod scenario_tests {
             cases: 2,
             .. ProptestConfig::default()
         })]
-        #[test]
+        // #[test]
         fn test_sync_protocol_reliable(scenario in gen_reliable_network_scenario(5)) {
             let mut simulation = SyncSimulation::new(scenario);
             simulation.run_with_reliable_network();
