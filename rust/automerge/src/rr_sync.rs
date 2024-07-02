@@ -1441,7 +1441,7 @@ mod scenario_tests {
         fn send(&mut self, to: ParticipantId, content: Vec<u8>) -> MessageId {
             let id = MessageId(self.next_id);
             self.next_id += 1;
-            self.messages.push_back(NetworkMessage { to, content, id});
+            self.messages.push_back(NetworkMessage { to, content, id });
             id
         }
 
@@ -1610,7 +1610,7 @@ mod scenario_tests {
                         last_sent_message_id,
                     } => {
                         let mut is_awaited_message = false;
-                        if let Some(last_sent_message_id) = last_sent_message_id  {
+                        if let Some(last_sent_message_id) = last_sent_message_id {
                             is_awaited_message = *last_sent_message_id == id;
                         }
                         if is_awaited_message {
@@ -1636,31 +1636,31 @@ mod scenario_tests {
         fn drop_message(&mut self, index: MessageIndex) {
             if let Some(NetworkMessage { id, .. }) = self.network.drop_message(index) {
                 let participants_to_resend: Vec<_> = self
-                .participants
-                .iter_mut()
-                .enumerate()
-                .filter_map(|(i, participant)| {
-                    if let ParticipantBehavior::ClientInitiated {
-                        ref mut waiting_for_response,
-                        ref mut last_sent_message_id,
-                    } = participant.behavior
-                    {
-                        if *last_sent_message_id == Some(id) {
-                            *last_sent_message_id = None;
-                            *waiting_for_response = false;
-                            Some(ParticipantId(i))
+                    .participants
+                    .iter_mut()
+                    .enumerate()
+                    .filter_map(|(i, participant)| {
+                        if let ParticipantBehavior::ClientInitiated {
+                            ref mut waiting_for_response,
+                            ref mut last_sent_message_id,
+                        } = participant.behavior
+                        {
+                            if *last_sent_message_id == Some(id) {
+                                *last_sent_message_id = None;
+                                *waiting_for_response = false;
+                                Some(ParticipantId(i))
+                            } else {
+                                None
+                            }
                         } else {
                             None
                         }
-                    } else {
-                        None
-                    }
-                })
-                .collect();
+                    })
+                    .collect();
 
-            for &participant_id in &participants_to_resend {
-                self.send_sync_message(participant_id, ParticipantId(1 - participant_id.0));
-            }
+                for &participant_id in &participants_to_resend {
+                    self.send_sync_message(participant_id, ParticipantId(1 - participant_id.0));
+                }
             }
         }
 
