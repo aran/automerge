@@ -2155,8 +2155,7 @@ mod scenario_tests {
                 },
             ],
         };
-        let simulation = test_sync_completes_on_reliable_network(scenario);
-        simulation.dump();
+        let _ = test_sync_completes_on_reliable_network(scenario);
     }
 
     // A few proptests
