@@ -1798,50 +1798,54 @@ mod scenario_tests {
     }
 
     fn gen_reliable_network_scenario(max_events: usize) -> impl Strategy<Value = SyncScenario> {
+        let participant_count = 2;
         (
-            vec(gen_initial_state(), 2..=2),
+            vec(gen_initial_state(), participant_count),
             Just(vec![
                 new_client_initiated_partipant(),
                 ParticipantBehavior::ServerResponsive,
             ]),
-            vec(gen_sync_event_reliable(2), 1..=max_events),
+            vec(gen_sync_event_reliable(participant_count), 1..=max_events),
         )
             .prop_map(
-                |(initial_states, participant_behaviors, events)| SyncScenario {
+                move |(initial_states, participant_behaviors, events)| SyncScenario {
                     initial_states,
                     participant_behaviors,
-                    events: ensure_client_runs_at_end(ParticipantId(0), events),
+                    events: ensure_participants_run_at_end(participant_count, events),
                 },
             )
     }
 
     fn gen_unreliable_network_scenario(max_events: usize) -> impl Strategy<Value = SyncScenario> {
+        let participant_count = 2;
         (
-            vec(gen_initial_state(), 2..=2),
+            vec(gen_initial_state(), participant_count),
             Just(vec![
                 new_client_initiated_partipant(),
                 ParticipantBehavior::ServerResponsive,
             ]),
-            vec(gen_sync_event(2, max_events), 1..=max_events),
+            vec(gen_sync_event(participant_count, max_events), 1..=max_events),
         )
             .prop_map(
-                |(initial_states, participant_behaviors, events)| SyncScenario {
+                move |(initial_states, participant_behaviors, events)| SyncScenario {
                     initial_states,
                     participant_behaviors,
-                    events: ensure_client_runs_at_end(ParticipantId(0), events),
+                    events: ensure_participants_run_at_end(participant_count, events),
                 },
             )
     }
 
     // Proptest will generate scenarios where the client gets changes after the last time it tries to sync
-    fn ensure_client_runs_at_end(
-        participant_id: ParticipantId,
+    fn ensure_participants_run_at_end(
+        participant_count: usize,
         mut events: Vec<SyncEvent>,
     ) -> Vec<SyncEvent> {
         events = events.clone();
-        events.push(SyncEvent::RunParticipant {
-            participant: participant_id,
-        });
+        for participant in 0..participant_count {
+            events.push(SyncEvent::RunParticipant {
+                participant: ParticipantId(participant),
+            });
+        }
 
         events
     }
@@ -2145,6 +2149,9 @@ mod scenario_tests {
                 },
                 SyncEvent::RunParticipant {
                     participant: ParticipantId(0),
+                },
+                SyncEvent::RunParticipant {
+                    participant: ParticipantId(1),
                 },
             ],
         };
