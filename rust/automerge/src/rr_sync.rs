@@ -2100,6 +2100,37 @@ mod scenario_tests {
         simulation.dump();
     }
 
+    #[test]
+    fn test_run_server_change_run() {
+        let scenario = SyncScenario {
+            initial_states: vec![AutoCommit::new(), AutoCommit::new()],
+            participant_behaviors: vec![
+                new_client_initiated_partipant(),
+                ParticipantBehavior::ServerResponsive,
+            ],
+            events: vec![
+                SyncEvent::RunParticipant {
+                    participant: ParticipantId(
+                        0,
+                    ),
+                },
+                SyncEvent::LocalChange {
+                    participant: ParticipantId(
+                        1,
+                    ),
+                    change_type: ChangeType::NewBranch,
+                },
+                SyncEvent::RunParticipant {
+                    participant: ParticipantId(
+                        0,
+                    ),
+                },
+            ],
+        };
+        let simulation = test_sync_completes_on_reliable_network(scenario);
+        simulation.dump();
+    }
+
     // A few proptests
     proptest! {
         #![proptest_config(ProptestConfig {
@@ -2113,7 +2144,6 @@ mod scenario_tests {
             prop_assert!(simulation.is_terminated(), "Sync did not terminate");
             prop_assert!(simulation.are_docs_heads_equal(), "Docs heads are not equal after sync");
             // prop_assert!(simulation.are_docs_missing_deps_equal(), "Docs missing deps are not equal after sync");
-
         }
     }
 
