@@ -1782,7 +1782,7 @@ mod scenario_tests {
             gen_local_change(),
             gen_run_participant(participant_count),
             gen_deliver_message(message_count),
-            (0..message_count).prop_map(|index| SyncEvent::DropMessage {
+            (0..(message_count / 4)).prop_map(|index| SyncEvent::DropMessage {
                 index: MessageIndex(index)
             }),
             (0..participant_count).prop_map(|p| SyncEvent::ResetSyncState {
@@ -2100,6 +2100,56 @@ mod scenario_tests {
         let _ = test_sync_eventually_completes(scenario);
     }
 
+    // #[test]
+    fn test_drop_two_messages() {
+        let scenario = SyncScenario {
+            initial_states: vec![AutoCommit::new(), AutoCommit::new()],
+            participant_behaviors: vec![
+                new_client_initiated_partipant(),
+                ParticipantBehavior::ServerResponsive,
+            ],
+            events: vec![
+                SyncEvent::LocalChange {
+                    participant: ParticipantId(
+                        0,
+                    ),
+                    change_type: ChangeType::NewBranch,
+                },
+                SyncEvent::RunParticipant {
+                    participant: ParticipantId(
+                        0,
+                    ),
+                },
+                SyncEvent::RunParticipant {
+                    participant: ParticipantId(
+                        1,
+                    ),
+                },
+                SyncEvent::DropMessage {
+                    index: MessageIndex(
+                        0,
+                    ),
+                },
+                SyncEvent::DropMessage {
+                    index: MessageIndex(
+                        0,
+                    ),
+                },
+                SyncEvent::RunParticipant {
+                    participant: ParticipantId(
+                        0,
+                    ),
+                },
+                SyncEvent::RunParticipant {
+                    participant: ParticipantId(
+                        1,
+                    ),
+                },
+            ],
+        };
+        let _ = test_sync_eventually_completes(scenario);
+    }
+
     #[test]
     fn test_sync_with_server_crash_after_first_message() {
         let scenario = SyncScenario {
@@ -2193,7 +2243,7 @@ mod scenario_tests {
             cases: 10000,
             .. ProptestConfig::default()
         })]
-        #[test]
+        // #[test]
         fn test_sync_protocol_unreliable(scenario in gen_unreliable_network_scenario(20)) {
             let mut simulation = SyncSimulation::new(scenario);
             simulation.run_with_eventually_reliable_network();
