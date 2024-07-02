@@ -2188,9 +2188,15 @@ mod scenario_tests {
             prop_assert!(simulation.are_docs_heads_equal(), "Docs heads are not equal after sync");
             prop_assert!(simulation.are_docs_missing_deps_equal(), "Docs missing deps are not equal after sync");
         }
+    }
 
-        // #[test]
-        fn test_sync_protocol_unreliable(scenario in gen_unreliable_network_scenario(5)) {
+    proptest! {
+        #![proptest_config(ProptestConfig {
+            cases: 10000,
+            .. ProptestConfig::default()
+        })]
+        #[test]
+        fn test_sync_protocol_unreliable(scenario in gen_unreliable_network_scenario(20)) {
             let mut simulation = SyncSimulation::new(scenario);
             simulation.run_with_eventually_reliable_network();
 
