@@ -1330,6 +1330,7 @@ mod scenario_tests {
     use crate::{AutoCommit, ReadDoc, ROOT};
     use proptest::collection::vec;
     use proptest::prelude::*;
+    use tracing::trace;
 
     use std::collections::VecDeque;
 
@@ -1447,7 +1448,9 @@ mod scenario_tests {
         fn deliver_message(&mut self, MessageIndex(index): MessageIndex) -> Option<NetworkMessage> {
             if index < self.messages.len() {
                 self.total_messages_delivered += 1;
-                Some(self.messages[index].clone())
+                let result = self.messages[index].clone();
+                trace!("Delivered message: {:?}", result);
+                Some(result)
             } else {
                 None
             }
@@ -1481,13 +1484,20 @@ mod scenario_tests {
         }
 
         fn run(&mut self) {
+            let mut idx = 0;
             while let Some(event) = self.events.pop_front() {
+                trace!("Running event {:?}: {:?}", idx, event);
+                idx += 1;
                 self.handle_event(event);
             }
         }
 
         fn run_with_eventually_reliable_network(&mut self) {
+            let mut idx = 0;
+
             while let Some(event) = self.events.pop_front() {
+                trace!("Running event {:?}: {:?}", idx, event);
+                idx += 1;
                 self.handle_event(event);
             }
 
@@ -1495,7 +1505,10 @@ mod scenario_tests {
         }
 
         fn run_with_reliable_network(&mut self) {
+            let mut idx = 0;
             while let Some(event) = self.events.pop_front() {
+                trace!("Running event {:?}: {:?}", idx, event);
+                idx += 1;
                 self.handle_event(event);
                 self.flush_network();
             }
@@ -1563,6 +1576,7 @@ mod scenario_tests {
                 .generate_sync_message(&mut participant.state)
             {
                 let message_id = self.network.send(to, msg.encode());
+                trace!("Sending message {:?} from {:?} to {:?}", message_id, from, to);
                 if let ParticipantBehavior::ClientInitiated {
                     waiting_for_response,
                     last_sent_message_id,
@@ -1573,6 +1587,7 @@ mod scenario_tests {
                 }
                 true
             } else {
+                trace!("Participant {:?} has no message to send", from);
                 false
             }
         }
@@ -1586,6 +1601,8 @@ mod scenario_tests {
                     .rr_sync()
                     .receive_sync_message(&mut participant.state, msg)
                     .unwrap();
+
+                trace!("Received message {:?} at {:?}", id, to);
 
                 match &mut participant.behavior {
                     ParticipantBehavior::ClientInitiated {
