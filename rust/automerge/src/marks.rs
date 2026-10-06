@@ -163,17 +163,39 @@ impl MarkSet {
     }
 
     pub(crate) fn from_query_state(q: &RichTextQueryState<'_>) -> Option<Arc<Self>> {
-        let mut marks = MarkStateMachine::default();
-        for (id, mark_data) in q.iter() {
-            marks.mark_begin(*id, mark_data.clone());
+        Self::from_open_marks(q.iter())
+    }
+
+    pub(crate) fn from_open_marks<'m, 'd: 'm>(
+        open: impl IntoIterator<Item = (&'m OpId, &'m MarkData<'d>)>,
+    ) -> Option<Arc<Self>> {
+        let mut winners: rustc_hash::FxHashMap<
+            &'m str,
+            (OpId, &'m crate::op_set2::ScalarValue<'d>),
+        > = Default::default();
+        for (id, data) in open {
+            match winners.entry(data.name.as_ref()) {
+                std::collections::hash_map::Entry::Occupied(mut e) => {
+                    if e.get().0 < *id {
+                        e.insert((*id, &data.value));
+                    }
+                }
+                std::collections::hash_map::Entry::Vacant(e) => {
+                    e.insert((*id, &data.value));
+                }
+            }
         }
         // A mark that resolves to a null value is an *unmark* (removal) tombstone
         // If all we have is tombstones then there are no marks at all.
-        let current = marks.current()?.as_ref().clone().without_unmarks();
-        if current.is_empty() {
+        let marks: BTreeMap<SmolStr, ScalarValue> = winners
+            .into_iter()
+            .map(|(name, (_, value))| (SmolStr::from(name), value.to_owned()))
+            .filter(|(_, value)| !matches!(value, ScalarValue::Null))
+            .collect();
+        if marks.is_empty() {
             None
         } else {
-            Some(Arc::new(current))
+            Some(Arc::new(MarkSet { marks }))
         }
     }
 
@@ -236,6 +258,66 @@ impl Mark {
 
     pub fn value(&self) -> &ScalarValue {
         &self.value
+    }
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct OpenMarks<'a> {
+    by_name: rustc_hash::FxHashMap<&'a str, BTreeMap<OpId, &'a crate::op_set2::ScalarValue<'a>>>,
+    names: rustc_hash::FxHashMap<OpId, &'a str>,
+    current: Arc<MarkSet>,
+}
+
+impl<'a> OpenMarks<'a> {
+    pub(crate) fn begin(&mut self, id: OpId, data: &'a MarkData<'a>) {
+        let name = data.name.as_ref();
+        self.names.insert(id, name);
+        self.by_name
+            .entry(name)
+            .or_default()
+            .insert(id, &data.value);
+        self.refresh(name);
+    }
+
+    pub(crate) fn end(&mut self, id: OpId) {
+        let Some(name) = self.names.remove(&id) else {
+            return;
+        };
+        if let Some(open) = self.by_name.get_mut(name) {
+            open.remove(&id);
+            if open.is_empty() {
+                self.by_name.remove(name);
+            }
+        }
+        self.refresh(name);
+    }
+
+    pub(crate) fn current(&self) -> Option<&Arc<MarkSet>> {
+        if self.current.is_empty() {
+            None
+        } else {
+            Some(&self.current)
+        }
+    }
+
+    fn refresh(&mut self, name: &str) {
+        let winner = self
+            .by_name
+            .get(name)
+            .and_then(|open| open.last_key_value())
+            .map(|(_, value)| (*value).to_owned())
+            .filter(|value| !matches!(value, ScalarValue::Null));
+        if self.current.marks.get(name) != winner.as_ref() {
+            let marks = &mut Arc::make_mut(&mut self.current).marks;
+            match winner {
+                Some(value) => {
+                    marks.insert(SmolStr::from(name), value);
+                }
+                None => {
+                    marks.remove(name);
+                }
+            }
+        }
     }
 }
 
@@ -537,5 +619,64 @@ mod tests {
             marks.iter().next(),
             Some(("bold", &ScalarValue::Boolean(true)))
         );
+    }
+
+    fn by_state_machine(open: &[(OpId, MarkData<'static>)]) -> Option<MarkSet> {
+        let mut sorted = open.to_vec();
+        sorted.sort_by_key(|(id, _)| *id);
+        let mut machine = MarkStateMachine::default();
+        for (id, data) in sorted {
+            machine.mark_begin(id, data);
+        }
+        let set = machine.current()?.as_ref().clone().without_unmarks();
+        (!set.is_empty()).then_some(set)
+    }
+
+    #[test]
+    fn open_marks_resolve_as_the_state_machine_does() {
+        let mut seed = 7u64;
+        let mut next = |n: u64| {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (seed >> 33) % n
+        };
+        let names = ["bold", "italic", "link"];
+        let values = [
+            OpScalar::Boolean(true),
+            OpScalar::Null,
+            OpScalar::Str(Cow::Borrowed("a")),
+            OpScalar::Str(Cow::Borrowed("b")),
+        ];
+        for _ in 0..50 {
+            let data: Vec<(OpId, MarkData<'static>)> = (0..40)
+                .map(|i| {
+                    let id = OpId::new(1 + next(30), next(2) as usize);
+                    let id = OpId::new(id.counter() * 40 + i, id.actor());
+                    let data = MarkData {
+                        name: Cow::Borrowed(names[next(3) as usize]),
+                        value: values[next(4) as usize].clone(),
+                    };
+                    (id, data)
+                })
+                .collect();
+            let mut open: Vec<(OpId, MarkData<'static>)> = Vec::new();
+            let mut kept = OpenMarks::default();
+            let mut pending: Vec<&(OpId, MarkData<'static>)> = data.iter().collect();
+            while !pending.is_empty() || !open.is_empty() {
+                if !pending.is_empty() && (open.is_empty() || next(3) > 0) {
+                    let (id, mark) = pending.swap_remove(next(pending.len() as u64) as usize);
+                    open.push((*id, mark.clone()));
+                    kept.begin(*id, mark);
+                } else {
+                    let (id, _) = open.swap_remove(next(open.len() as u64) as usize);
+                    kept.end(id);
+                }
+                let expected = by_state_machine(&open);
+                let resolved = MarkSet::from_open_marks(open.iter().map(|(id, data)| (id, data)));
+                assert_eq!(resolved.as_deref(), expected.as_ref());
+                assert_eq!(kept.current().map(|set| set.as_ref()), expected.as_ref());
+            }
+        }
     }
 }

@@ -494,10 +494,8 @@ impl OpSet {
             elemid = self.elemid_at(pos, range.end)?.0;
         }
 
-        let marks = self.cols.index.mark.rich_text_at(pos, None);
-
         Some(QueryNth {
-            marks: MarkSet::from_query_state(&marks),
+            marks: self.cols.index.mark.mark_set_at(pos),
             pos: pos + 1,
             index,
             elemid,
@@ -510,8 +508,9 @@ impl OpSet {
         mut pos: usize,
     ) -> Option<usize> {
         let end = text_iter.end_pos();
-        let mut expand = self.cols.expand.iter();
-        let mut marks = self.cols.index.mark.iter();
+        let start = (pos + 1).min(end);
+        let mut expand = self.cols.expand.iter_range(start..end);
+        let mut marks = self.cols.index.mark.iter_range(start..end);
         let mut found: Vec<(MarkIdx, usize)> = vec![];
 
         while let Some(run) = text_iter.next_run() {
@@ -525,11 +524,13 @@ impl OpSet {
                         // empty string scalar. Only mark ops are transparent for
                         // this scan; a visible non-mark element is a real insertion
                         // boundary.
-                        if self.get(p).is_some_and(|op| !op.is_mark()) {
-                            return found.last().map(|p| p.1);
-                        }
+                        let m = match marks.shift_next(p..end) {
+                            Some(Some(m)) => Some(m),
+                            Some(None) => return found.last().map(|p| p.1),
+                            None => None,
+                        };
                         let e = expand.shift_next(p..end)?;
-                        if let Some(Some(m)) = marks.shift_next(p..end) {
+                        if let Some(m) = m {
                             // can't insert between mark start/end pair
                             if let MarkIdx::End(id) = m {
                                 if let Some(j) =
@@ -1020,7 +1021,7 @@ impl OpSet {
         let base = widths.total();
         let mut widths_at = range.start;
 
-        let mut state = RichTextQueryState::default();
+        let mut open = crate::marks::OpenMarks::default();
         let mut seg: Option<(usize, std::sync::Arc<MarkSet>)> = None;
         let mut iter = self.cols.index.mark.iter_range(range.clone());
         let mut pos = range.start;
@@ -1045,15 +1046,13 @@ impl OpSet {
                 match idx {
                     MarkIdx::Start(id) => {
                         if let Some(data) = self.cols.index.mark.mark_data(&id) {
-                            state.map.insert(id, data.clone());
+                            open.begin(id, data);
                         }
                     }
-                    MarkIdx::End(id) => {
-                        state.map.remove(&id);
-                    }
+                    MarkIdx::End(id) => open.end(id),
                 }
-                if let Some(set) = MarkSet::from_query_state(&state) {
-                    seg = Some((seq, set));
+                if let Some(set) = open.current() {
+                    seg = Some((seq, set.clone()));
                 }
                 pos += 1;
             }
@@ -1076,8 +1075,10 @@ impl OpSet {
         let Some(seek) = widths.advance_prefix(index as u64) else {
             return MarkSet::default();
         };
-        let state = self.cols.index.mark.rich_text_at(seek.pos, None);
-        MarkSet::from_query_state(&state)
+        self.cols
+            .index
+            .mark
+            .mark_set_at(seek.pos)
             .map(|set| set.as_ref().clone())
             .unwrap_or_default()
     }
