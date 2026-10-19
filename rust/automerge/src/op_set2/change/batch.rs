@@ -153,7 +153,7 @@ impl<'a> Untangler<'a> {
 
         assert_eq!(self.top, Top::Nothing);
 
-        self.change_ops.sort_by(|a, b| {
+        self.change_ops.sort_unstable_by(|a, b| {
             a.pos
                 .unwrap()
                 .cmp(&b.pos.unwrap())
@@ -729,6 +729,8 @@ impl BatchApply {
     /// graph is already up to date; the mask has not moved.
     fn import_ops(&mut self, doc: &mut Automerge, mask: Option<&Mask>) {
         let actors_before = doc.ops().actors.len();
+        self.ops
+            .reserve(self.changes.iter().map(Change::len).sum::<usize>());
         for c in &self.changes {
             doc.import_ops_to(c, &mut self.ops, mask).unwrap();
         }
@@ -1046,57 +1048,44 @@ impl Automerge {
         ops: &mut Vec<ChangeOp>,
         mask: Option<&Mask>,
     ) -> Result<(), AutomergeError> {
-        let new_ops = self.import_ops(change, mask)?;
-        ops.extend(new_ops);
-        Ok(())
-    }
-
-    fn import_ops(
-        &mut self,
-        change: &Change,
-        mask: Option<&Mask>,
-    ) -> Result<Vec<ChangeOp>, AutomergeError> {
         let actors: Vec<_> = change
             .actors()
             .map(|a| self.ops.lookup_actor(a).unwrap())
             .collect();
 
-        change
-            .iter_ops()
-            .enumerate()
-            .map(|(i, c)| {
-                let id = OpId::new(change.start_op().get() + i as u64, 0).map(&actors)?;
-                let key = c.key.map(&actors)?;
-                let obj = c.obj.map(&actors)?;
-                let pred = c
-                    .pred
-                    .into_iter()
-                    .map(|id| id.map(&actors))
-                    .collect::<Result<Vec<_>, _>>()?;
-                let bld = OpBuilder {
-                    id,
-                    obj,
-                    key,
-                    action: c.action.try_into().map_err(AutomergeError::encoding)?,
-                    value: c.val.into_ref(),
-                    mark_name: c.mark_name.map(String::from).map(Cow::Owned),
-                    expand: c.expand,
-                    insert: c.insert,
-                    pred,
-                };
-                let change = ChangeOp {
-                    pos: None,
-                    subsort: 0,
-                    conflicted: false,
-                    succ: vec![],
-                    // The invariant fact for this batch: hidden by the mask
-                    // snapshot taken before the graph was updated.
-                    masked: mask.is_some_and(|m| m.hides(&id)),
-                    bld,
-                };
-                Ok(change)
-            })
-            .collect()
+        for (i, c) in change.iter_ops().enumerate() {
+            let id = OpId::new(change.start_op().get() + i as u64, 0).map(&actors)?;
+            let key = c.key.map(&actors)?;
+            let obj = c.obj.map(&actors)?;
+            let pred = c
+                .pred
+                .into_iter()
+                .map(|id| id.map(&actors))
+                .collect::<Result<Vec<_>, _>>()?;
+            let bld = OpBuilder {
+                id,
+                obj,
+                key,
+                action: c.action.try_into().map_err(AutomergeError::encoding)?,
+                value: c.val.into_ref(),
+                mark_name: c.mark_name.map(String::from).map(Cow::Owned),
+                expand: c.expand,
+                insert: c.insert,
+                pred,
+            };
+            let change = ChangeOp {
+                pos: None,
+                subsort: 0,
+                conflicted: false,
+                succ: vec![],
+                // The invariant fact for this batch: hidden by the mask
+                // snapshot taken before the graph was updated.
+                masked: mask.is_some_and(|m| m.hides(&id)),
+                bld,
+            };
+            ops.push(change);
+        }
+        Ok(())
     }
 }
 
