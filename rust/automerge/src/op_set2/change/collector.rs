@@ -26,7 +26,7 @@ use crate::{
     op_set2::{
         op_set::OpIterWithoutSucc, ChangeMetadata, KeyRef, Op, OpBuilder, OpSet, ReadOpError,
     },
-    types::{ActorId, ChangeHash, ObjId, OpId},
+    types::{ActorId, ChangeHash, ElemId, ObjId, OpId},
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -358,6 +358,7 @@ struct Reread<'a> {
     jumps: usize,
     readers: Vec<OpIterWithoutSucc<'a>>,
     fallback: bool,
+    dels: WaitingDels,
 }
 
 impl<'a> Reread<'a> {
@@ -371,6 +372,7 @@ impl<'a> Reread<'a> {
             jumps: 0,
             readers: Vec::new(),
             fallback: false,
+            dels: WaitingDels::default(),
         }
     }
 
@@ -416,6 +418,36 @@ impl<'a> Reread<'a> {
                     .iter_range_without_succ(&(run.pos..self.op_set.len()))
             }
         }
+    }
+}
+
+#[derive(Debug)]
+struct WaitingDel {
+    obj: ObjId,
+    elem: ElemId,
+    pred: OpId,
+}
+
+#[derive(Debug, Default)]
+struct WaitingDels {
+    base: OpId,
+    dels: BTreeMap<usize, WaitingDel>,
+}
+
+impl WaitingDels {
+    fn insert(&mut self, index: usize, id: OpId, del: WaitingDel) {
+        self.base = OpId::new(id.counter() - index as u64, id.actor());
+        self.dels.insert(index, del);
+    }
+
+    fn take<'a>(&mut self, index: usize) -> Option<OpBuilder<'a>> {
+        let del = self.dels.remove(&index)?;
+        let id = OpId::new(self.base.counter() + index as u64, self.base.actor());
+        Some(Op::del(id, del.obj, KeyRef::Seq(del.elem)).build(vec![del.pred]))
+    }
+
+    fn first(&self) -> Option<usize> {
+        self.dels.first_key_value().map(|(k, _)| *k)
     }
 }
 
@@ -482,6 +514,46 @@ impl<'a> ProgressiveEncoder<'a> {
         }
     }
 
+    fn add_del(
+        &mut self,
+        index: usize,
+        id: OpId,
+        obj: ObjId,
+        key: KeyRef<'a>,
+        pred: &[OpId],
+        op_set: Option<&'a OpSet>,
+    ) {
+        if index != self.len && self.reread.is_none() && self.queue.len() >= MAX_FULL_QUEUE {
+            if let Some(op_set) = op_set {
+                self.reread = Some(Box::new(Reread::new(op_set)));
+            }
+        }
+        let slim = match (&key, pred) {
+            (KeyRef::Seq(elem), [pred]) if index != self.len && self.reread.is_some() => {
+                Some(WaitingDel {
+                    obj,
+                    elem: *elem,
+                    pred: *pred,
+                })
+            }
+            _ => None,
+        };
+        let Some(del) = slim else {
+            self.add(index, Op::del(id, obj, key).build(pred.to_vec()), None);
+            return;
+        };
+        if let Some(actor) = obj.actor() {
+            self.process_actor(usize::from(actor));
+        }
+        if let Some(actor) = del.elem.actor() {
+            self.process_actor(usize::from(actor));
+        }
+        self.process_actor(del.pred.actor());
+        if let Some(r) = &mut self.reread {
+            r.dels.insert(index, id, del);
+        }
+    }
+
     fn enqueue(&mut self, index: usize, op: OpBuilder<'a>, op_set: &'a OpSet, pos: usize) {
         let r = match &mut self.reread {
             Some(r) => r,
@@ -530,12 +602,18 @@ impl<'a> ProgressiveEncoder<'a> {
             let Some(mut r) = self.reread.take() else {
                 return;
             };
-            let run = r.take_run(self.len);
-            if let Some(run) = run {
+            let found = if let Some(op) = r.dels.take(self.len) {
+                self.append(op);
+                self.len += 1;
+                true
+            } else if let Some(run) = r.take_run(self.len) {
                 self.append_run(&mut r, self.len, run);
-            }
+                true
+            } else {
+                false
+            };
             self.reread = Some(r);
-            if run.is_none() {
+            if !found {
                 return;
             }
         }
@@ -595,20 +673,25 @@ impl<'a> ProgressiveEncoder<'a> {
         let mut reread = self.reread.take();
         loop {
             let next_op = queue.first_key_value().map(|(k, _)| *k);
+            let next_del = reread.as_ref().and_then(|r| r.dels.first());
             let next_run = reread.as_ref().and_then(|r| r.first_run());
-            match (next_op, next_run, reread.as_mut()) {
-                (Some(o), r, _) if r.is_none_or(|r| o < r) => {
-                    if let Some(op) = queue.remove(&o) {
-                        self.append(op);
-                        self.len += 1;
-                    }
+            let Some(next) = [next_op, next_del, next_run].into_iter().flatten().min() else {
+                break;
+            };
+            if next_op == Some(next) {
+                if let Some(op) = queue.remove(&next) {
+                    self.append(op);
+                    self.len += 1;
                 }
-                (_, Some(start), Some(r)) => {
-                    if let Some(run) = r.take_run(start) {
-                        self.append_run(r, start, run);
-                    }
+            } else if next_del == Some(next) {
+                if let Some(op) = reread.as_mut().and_then(|r| r.dels.take(next)) {
+                    self.append(op);
+                    self.len += 1;
                 }
-                _ => break,
+            } else if let Some(r) = reread.as_mut() {
+                if let Some(run) = r.take_run(next) {
+                    self.append_run(r, next, run);
+                }
             }
         }
     }
@@ -739,6 +822,21 @@ impl<'a> ChangeBuilder<'a> {
         let index = (counter - self.start_op) as usize;
 
         self.encoder.add(index, op, at);
+    }
+
+    fn add_del(
+        &mut self,
+        id: OpId,
+        obj: ObjId,
+        key: KeyRef<'a>,
+        pred: &[OpId],
+        op_set: Option<&'a OpSet>,
+    ) {
+        let index = (id.counter() - self.start_op) as usize;
+        match &mut self.encoder {
+            OpEncoderStrategy::Enc(e) => e.add_del(index, id, obj, key, pred, op_set),
+            encoder => encoder.add(index, Op::del(id, obj, key).build(pred.to_vec()), None),
+        }
     }
 }
 
@@ -1028,10 +1126,8 @@ impl<'a> ChangeCollector<'a> {
     pub(crate) fn flush_deletes(&mut self) {
         if let Some((obj, key)) = self.last.take() {
             for (id, pred) in &self.preds {
-                let op = Op::del(*id, obj, key.clone());
-                let op = op.build(pred.to_vec());
-                if let Some(index) = self.builders_index(op.id) {
-                    self.builders[index].add(op, None);
+                if let Some(index) = self.builders_index(*id) {
+                    self.builders[index].add_del(*id, obj, key.clone(), pred, self.op_set);
                 }
             }
             self.preds.clear();

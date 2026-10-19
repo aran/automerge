@@ -110,3 +110,52 @@ fn reloads_large_changes_from_several_actors() {
     doc.commit();
     assert_reloads(&mut doc);
 }
+
+#[test]
+fn reloads_change_of_scattered_deletes() {
+    let mut doc = AutoCommit::new();
+    let text = doc.put_object(ROOT, "text", ObjType::Text).unwrap();
+    let typed: String = (0..6000).map(|i| (b'a' + (i % 26) as u8) as char).collect();
+    doc.splice_text(&text, 0, 0, &typed).unwrap();
+    let mut rng: u64 = 29;
+    for _ in 0..3000 {
+        rng ^= rng << 13;
+        rng ^= rng >> 7;
+        rng ^= rng << 17;
+        let len = doc.length(&text) as u64;
+        let pos = (rng % len) as usize;
+        doc.splice_text(&text, pos, 1, "").unwrap();
+    }
+    doc.commit();
+    assert_reloads(&mut doc);
+}
+
+#[test]
+fn reloads_change_deleting_conflicts_and_keys_behind_other_deletes() {
+    let mut doc = AutoCommit::new().with_actor(ActorId::from([1u8; 16]));
+    let list = doc.put_object(ROOT, "list", ObjType::List).unwrap();
+    let map = doc.put_object(ROOT, "map", ObjType::Map).unwrap();
+    for i in 0..3000 {
+        doc.insert(&list, i, i as i64).unwrap();
+    }
+    for i in 0..200 {
+        doc.put(&map, format!("k{i}"), i as i64).unwrap();
+    }
+    doc.commit();
+    let mut other = doc.fork().with_actor(ActorId::from([2u8; 16]));
+    for i in (0..3000).step_by(15) {
+        other.put(&list, i, "theirs").unwrap();
+        doc.put(&list, i, "ours").unwrap();
+    }
+    other.commit();
+    doc.commit();
+    doc.merge(&mut other).unwrap();
+    for i in (0..3000).rev() {
+        doc.delete(&list, i).unwrap();
+    }
+    for i in 0..200 {
+        doc.delete(&map, format!("k{i}")).unwrap();
+    }
+    doc.commit();
+    assert_reloads(&mut doc);
+}

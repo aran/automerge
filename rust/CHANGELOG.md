@@ -11,6 +11,9 @@
   changes are stored out of the order they were made in, such as rich text
   with paragraph formatting. This lowers peak memory by about 70% in a test on
   a large document.
+* `Automerge::load` and `get_changes` use less peak memory on large changes
+  that delete text or list elements. This lowers peak memory by about 40% in a
+  test on a large document.
 
 ## 0.12.0
 
