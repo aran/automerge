@@ -7,6 +7,10 @@
 * `ReadDoc::get_marks` uses the same units as `length`, `marks`, and `get`
   rather than disagreeing under some text encodings.
 * `ReadDoc::list_range` on a text no longer yields marks as elements.
+* `Automerge::load` and `get_changes` use less peak memory on documents whose
+  changes are stored out of the order they were made in, such as rich text
+  with paragraph formatting. This lowers peak memory by about 70% in a test on
+  a large document.
 
 ## 0.12.0
 
