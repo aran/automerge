@@ -20,6 +20,9 @@
 * `Automerge::apply_changes`, `load_incremental` and `merge` without a patch
   log no longer build patch events only to drop them. This lowers peak memory
   by about 30% in a test on a large document.
+* Applying changes holds one copy of their ops rather than two, and puts them
+  in document order without scratch space. This lowers peak memory by about
+  30% in a test on a large document.
 
 ## 0.12.0
 
