@@ -46,6 +46,8 @@
 * `Automerge::load_with` and `load_with_options` no longer log an error at
   ERROR level when they return it, as they did for every `MissingDeps` from
   loading part of a document.
+* `Automerge::apply_changes` rejecting a change for reusing an actor's
+  sequence number no longer drops queued changes that do not depend on it.
 
 ## 0.12.0
 

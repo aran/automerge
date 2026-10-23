@@ -4692,3 +4692,29 @@ fn load_all_is_an_error_when_a_chunk_does_not_parse() {
 
     assert!(Change::load_all(&data).is_err());
 }
+
+#[test]
+fn rejected_duplicate_seq_keeps_queued_changes_of_the_applied_branch() {
+    let mut doc = AutoCommit::new();
+    let mut changes = Vec::new();
+    for i in 0..3 {
+        doc.put(ROOT, "key", i).unwrap();
+        doc.commit();
+        changes.push(doc.get_last_local_change().unwrap().clone());
+    }
+    let mut rival = AutoCommit::new().with_actor(doc.get_actor().clone());
+    rival.put(ROOT, "rival", 1).unwrap();
+    rival.commit();
+    let rival = rival.get_last_local_change().unwrap().clone();
+
+    let mut loaded = AutoCommit::new();
+    loaded.apply_changes([changes[0].clone()]).unwrap();
+    loaded.apply_changes([changes[2].clone()]).unwrap();
+    assert!(matches!(
+        loaded.apply_changes([rival]),
+        Err(AutomergeError::DuplicateSeqNumber(1, _))
+    ));
+    loaded.apply_changes([changes[1].clone()]).unwrap();
+
+    assert_eq!(loaded.get_heads(), doc.get_heads());
+}
