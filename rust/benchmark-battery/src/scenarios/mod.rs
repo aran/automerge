@@ -267,6 +267,7 @@ pub fn benchmarks() -> Vec<Benchmark> {
     benchmarks.extend(load_save::benchmarks().into_iter().map(Into::into));
     benchmarks.extend(map::benchmarks());
     benchmarks.extend(marks::benchmarks().into_iter().map(Into::into));
+    benchmarks.extend(marks::series().into_iter().map(Into::into));
     benchmarks.extend(memory::benchmarks().into_iter().map(Into::into));
     benchmarks.extend(range::benchmarks().into_iter().map(Into::into));
     benchmarks.extend(sync::benchmarks());

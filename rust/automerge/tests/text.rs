@@ -1193,3 +1193,62 @@ fn cursor_on_a_deleted_character_points_at_the_next_surviving_one() {
         1
     );
 }
+
+#[test]
+fn marks_where_many_expanding_marks_overlap() {
+    let mut doc = AutoCommit::new();
+    let text = doc.put_object(ROOT, "text", ObjType::Text).unwrap();
+    let mut other = doc.fork();
+    let expands = [
+        ExpandMark::Both,
+        ExpandMark::After,
+        ExpandMark::Before,
+        ExpandMark::None,
+    ];
+    for step in 0..60 {
+        let d = if step % 3 == 0 { &mut other } else { &mut doc };
+        let at = d.length(&text);
+        d.split_block(&text, at).unwrap();
+        let head = format!("head{step}");
+        let n = head.len();
+        d.splice_text(&text, at + 1, 0, &head).unwrap();
+        let name = ["bold", "italic", "link"][step % 3];
+        let value = if name == "link" {
+            ScalarValue::from(format!("u{}", step % 2))
+        } else {
+            ScalarValue::from(true)
+        };
+        let expand = expands[step % 4];
+        d.mark(
+            &text,
+            Mark::new(name.into(), value, at + 1, at + 1 + n),
+            expand,
+        )
+        .unwrap();
+        let rest = " and the rest";
+        d.splice_text(&text, at + 1 + n, 0, rest).unwrap();
+        if step % 2 == 0 {
+            d.unmark(&text, name, at + 1 + n, at + 1 + n + rest.len(), expand)
+                .unwrap();
+        }
+        let mid = d.length(&text) / 2;
+        d.splice_text(&text, mid, 0, "x").unwrap();
+        if step % 3 == 0 {
+            doc.merge(&mut other).unwrap();
+            other.merge(&mut doc).unwrap();
+        }
+    }
+    doc.merge(&mut other).unwrap();
+
+    let heads = doc.get_heads();
+    let marks = doc.marks(&text).unwrap();
+    assert!(marks.len() > 3);
+    assert_eq!(marks, doc.marks_at(&text, &heads).unwrap());
+    for index in 0..doc.length(&text) {
+        assert_eq!(
+            mark_pairs(&doc.get_marks(&text, index, None).unwrap()),
+            marks_covering(&marks, index),
+            "marks at index {index}"
+        );
+    }
+}

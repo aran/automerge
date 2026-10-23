@@ -1,4 +1,5 @@
 use crate::actor::{ActorRefs, ActorRemoval, ActorShift, HasActorIndices};
+use crate::marks::MarkSet;
 use crate::op_set2::op_set::RichTextQueryState;
 use crate::op_set2::MarkData;
 use crate::types::{Clock, OpId};
@@ -238,10 +239,6 @@ impl MarkIndexColumn {
         self.data.len()
     }
 
-    pub(crate) fn iter(&self) -> hexane::Iter<'_, Option<MarkIdx>> {
-        self.data.values().iter()
-    }
-
     pub(crate) fn iter_range(
         &self,
         range: std::ops::Range<usize>,
@@ -316,6 +313,14 @@ impl MarkIndexColumn {
             marks.map.insert(id, data.clone());
         }
         marks
+    }
+
+    pub(crate) fn mark_set_at(&self, target: usize) -> Option<std::sync::Arc<MarkSet>> {
+        let open: Vec<OpId> = self.marks_at(target, None).collect();
+        MarkSet::from_open_marks(
+            open.iter()
+                .map(|id| (id, self.cache.get(id).expect("an open mark has data"))),
+        )
     }
 
     pub(crate) fn marks_at<'a>(
