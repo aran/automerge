@@ -51,7 +51,7 @@ pub(crate) use mark_index::{MarkIdx, MarkIndexBuilder, MarkIndexColumn};
 pub(crate) use marks::{MarkIter, NoMarkIter};
 pub(crate) use op_iter::{
     ActionIter, ActionValueIter, CtrWalker, InsertIter, KeyIter, MarkInfoIter, ObjIdIter, OpIdIter,
-    OpIter, ReadOpError, SuccIterIter, SuccWalker, ValueIter,
+    OpIter, OpIterWithoutSucc, ReadOpError, SuccIterIter, SuccWalker, ValueIter,
 };
 pub(crate) use op_query::{FixCounters, OpQuery, OpQueryTerm};
 pub(crate) use top_op::{TopIter, TopOps};
@@ -1476,6 +1476,26 @@ impl OpSet {
             marks: self.mark_info_iter_range(range),
             range: range.clone(),
             op_set: self,
+        }
+    }
+
+    pub(crate) fn iter_range_without_succ(&self, range: &Range<usize>) -> OpIterWithoutSucc<'_> {
+        OpIterWithoutSucc {
+            pos: range.start,
+            id: self.id_iter_range(range),
+            obj: ObjIdIter::new_range(
+                self.cols.obj_actor.iter_range(range.clone()),
+                self.cols.obj_ctr.iter_range(range.clone()),
+            ),
+            key: KeyIter::new(
+                self.cols.key_str.iter_range(range.clone()),
+                self.cols.key_actor.iter_range(range.clone()),
+                self.cols.key_ctr.iter_range(range.clone()),
+            ),
+            insert: InsertIter::new(self.cols.insert.values().iter_range(range.clone())),
+            action: ActionIter::new(self.cols.action.iter_range(range.clone())),
+            value: self.value_iter_range(range),
+            marks: self.mark_info_iter_range(range),
         }
     }
 

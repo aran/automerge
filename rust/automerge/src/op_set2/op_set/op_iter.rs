@@ -193,6 +193,78 @@ impl<'a> Iterator for OpIter<'a> {
     }
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct OpIterWithoutSucc<'a> {
+    pub(super) pos: usize,
+    pub(super) id: OpIdIter<'a>,
+    pub(super) obj: ObjIdIter<'a>,
+    pub(super) key: KeyIter<'a>,
+    pub(super) insert: InsertIter<'a>,
+    pub(super) action: ActionIter<'a>,
+    pub(super) value: ValueIter<'a>,
+    pub(super) marks: MarkInfoIter<'a>,
+}
+
+impl<'a> OpIterWithoutSucc<'a> {
+    pub(crate) fn pos(&self) -> usize {
+        self.pos
+    }
+
+    pub(crate) fn try_next(&mut self) -> Result<Option<Op<'a>>, ReadOpError> {
+        let Some(id) = self.id.maybe_try_next()? else {
+            return Ok(None);
+        };
+        let key = self.key.try_next()?;
+        let insert = self.insert.try_next()?;
+        let action = self.action.try_next()?;
+        let obj = self.obj.try_next()?;
+        let value = self.value.try_next()?;
+        let (mark_name, expand) = self.marks.try_next()?;
+        let pos = self.pos;
+        self.pos += 1;
+        Ok(Some(Op {
+            pos,
+            conflict: false,
+            id,
+            key,
+            insert,
+            action,
+            obj,
+            value,
+            expand,
+            mark_name,
+            succ_cursors: SuccCursors::default(),
+        }))
+    }
+
+    pub(crate) fn try_nth(&mut self, n: usize) -> Result<Option<Op<'a>>, ReadOpError> {
+        let Some(id) = self.id.maybe_try_nth(n)? else {
+            return Ok(None);
+        };
+        let key = self.key.try_nth(n)?;
+        let insert = self.insert.try_nth(n)?;
+        let action = self.action.try_nth(n)?;
+        let obj = self.obj.try_nth(n)?;
+        let value = self.value.try_nth(n)?;
+        let (mark_name, expand) = self.marks.try_nth(n)?;
+        let pos = self.pos + n;
+        self.pos += n + 1;
+        Ok(Some(Op {
+            pos,
+            conflict: false,
+            id,
+            key,
+            insert,
+            action,
+            obj,
+            value,
+            expand,
+            mark_name,
+            succ_cursors: SuccCursors::default(),
+        }))
+    }
+}
+
 impl OpId {
     pub(crate) fn try_load(actor: Option<ActorIdx>, ctr: Option<i64>) -> Result<OpId, ReadOpError> {
         match (actor, ctr) {

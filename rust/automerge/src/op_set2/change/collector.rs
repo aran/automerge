@@ -23,7 +23,9 @@ use crate::storage::load::change_collector::Error;
 use crate::storage::{ChunkType, Header};
 use crate::{
     change::Change,
-    op_set2::{ChangeMetadata, KeyRef, Op, OpBuilder, OpSet, ReadOpError},
+    op_set2::{
+        op_set::OpIterWithoutSucc, ChangeMetadata, KeyRef, Op, OpBuilder, OpSet, ReadOpError,
+    },
     types::{ActorId, ChangeHash, ObjId, OpId},
 };
 
@@ -92,6 +94,7 @@ pub(crate) struct ChangeCollector<'a> {
     pub(crate) builders: Vec<ChangeBuilder<'a>>,
     last: Option<(ObjId, KeyRef<'a>)>,
     preds: HashMap<OpId, Vec<OpId>>,
+    op_set: Option<&'a OpSet>,
 }
 
 #[derive(Clone, PartialEq, Debug)]
@@ -164,10 +167,10 @@ impl<'a> OpEncoderStrategy<'a> {
         }
     }
 
-    fn add(&mut self, index: usize, op: OpBuilder<'a>) {
+    fn add(&mut self, index: usize, op: OpBuilder<'a>, at: Option<(&'a OpSet, usize)>) {
         match self {
             Self::Ops(v) => v.add(index, op),
-            Self::Enc(e) => e.add(index, op),
+            Self::Enc(e) => e.add(index, op, at),
             Self::Null => (),
         }
     }
@@ -333,6 +336,89 @@ impl<'a> VecEncoder<'a> {
     }
 }
 
+const MAX_FULL_QUEUE: usize = 1024;
+const MAX_READERS: usize = 4;
+const JUMP_ALLOWANCE: usize = 64;
+const OPS_PER_JUMP: usize = 12;
+
+#[derive(Debug, Clone, Copy)]
+struct QueuedRun {
+    pos: usize,
+    len: usize,
+    preds: bool,
+}
+
+#[derive(Debug)]
+struct Reread<'a> {
+    op_set: &'a OpSet,
+    runs: BTreeMap<usize, QueuedRun>,
+    tail: Option<(usize, QueuedRun)>,
+    preds: HashMap<usize, Vec<OpId>>,
+    queued: usize,
+    jumps: usize,
+    readers: Vec<OpIterWithoutSucc<'a>>,
+    fallback: bool,
+}
+
+impl<'a> Reread<'a> {
+    fn new(op_set: &'a OpSet) -> Self {
+        Self {
+            op_set,
+            runs: BTreeMap::new(),
+            tail: None,
+            preds: HashMap::new(),
+            queued: 0,
+            jumps: 0,
+            readers: Vec::new(),
+            fallback: false,
+        }
+    }
+
+    fn take_run(&mut self, index: usize) -> Option<QueuedRun> {
+        if let Some(run) = self.runs.remove(&index) {
+            return Some(run);
+        }
+        self.tail.take_if(|(s, _)| *s == index).map(|(_, run)| run)
+    }
+
+    fn first_run(&self) -> Option<usize> {
+        let first = self.runs.first_key_value().map(|(k, _)| *k);
+        let tail = self.tail.map(|(s, _)| s);
+        match (first, tail) {
+            (Some(f), Some(t)) => Some(f.min(t)),
+            (f, t) => f.or(t),
+        }
+    }
+
+    fn read(&mut self, run: QueuedRun) -> OpIterWithoutSucc<'a> {
+        let best = self
+            .readers
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| r.pos() <= run.pos)
+            .max_by_key(|(_, r)| r.pos())
+            .map(|(i, _)| i);
+        match best {
+            Some(i) => self.readers.swap_remove(i),
+            None => {
+                if self.readers.len() >= MAX_READERS {
+                    if let Some(i) = self
+                        .readers
+                        .iter()
+                        .enumerate()
+                        .min_by_key(|(_, r)| r.pos())
+                        .map(|(i, _)| i)
+                    {
+                        self.readers.swap_remove(i);
+                    }
+                }
+                self.op_set
+                    .iter_range_without_succ(&(run.pos..self.op_set.len()))
+            }
+        }
+    }
+}
+
 #[derive(Debug, Default)]
 pub(crate) struct ProgressiveEncoder<'a> {
     pub(crate) len: usize,
@@ -340,6 +426,7 @@ pub(crate) struct ProgressiveEncoder<'a> {
     pub(crate) num_ops: u64,
     actors: Vec<bool>,
     queue: BTreeMap<usize, OpBuilder<'a>>,
+    reread: Option<Box<Reread<'a>>>,
     obj_actor: hexane::Encoder<'a, Option<ActorIdx>>,
     obj_ctr: hexane::Encoder<'a, Option<u64>>,
     key_actor: hexane::Encoder<'a, Option<ActorIdx>>,
@@ -382,18 +469,99 @@ impl<'a> ProgressiveEncoder<'a> {
         }
     }
 
-    fn add(&mut self, index: usize, op: OpBuilder<'a>) {
+    fn add(&mut self, index: usize, op: OpBuilder<'a>, at: Option<(&'a OpSet, usize)>) {
         self.process_op(&op);
         if index == self.len {
             self.append(op);
             self.len += 1;
-            while let Some(op) = self.queue.remove(&self.len) {
-                self.append(op);
-                self.len += 1;
-            }
+            self.drain();
+        } else if let Some((op_set, pos)) = at {
+            self.enqueue(index, op, op_set, pos);
         } else {
             self.queue.insert(index, op);
         }
+    }
+
+    fn enqueue(&mut self, index: usize, op: OpBuilder<'a>, op_set: &'a OpSet, pos: usize) {
+        let r = match &mut self.reread {
+            Some(r) => r,
+            None if self.queue.len() < MAX_FULL_QUEUE => {
+                self.queue.insert(index, op);
+                return;
+            }
+            None => self.reread.insert(Box::new(Reread::new(op_set))),
+        };
+        r.queued += 1;
+        if let Some((start, run)) = &mut r.tail {
+            if *start + run.len == index && run.pos + run.len == pos {
+                run.len += 1;
+                if !op.pred.is_empty() {
+                    run.preds = true;
+                    r.preds.insert(index, op.pred);
+                }
+                return;
+            }
+        }
+        if r.fallback
+            || (r.jumps > JUMP_ALLOWANCE && (r.jumps - JUMP_ALLOWANCE) * OPS_PER_JUMP > r.queued)
+        {
+            r.fallback = true;
+            self.queue.insert(index, op);
+            return;
+        }
+        r.jumps += 1;
+        let preds = !op.pred.is_empty();
+        let run = QueuedRun { pos, len: 1, preds };
+        if let Some((start, run)) = r.tail.replace((index, run)) {
+            r.runs.insert(start, run);
+        }
+        if preds {
+            r.preds.insert(index, op.pred);
+        }
+    }
+
+    fn drain(&mut self) {
+        loop {
+            if let Some(op) = self.queue.remove(&self.len) {
+                self.append(op);
+                self.len += 1;
+                continue;
+            }
+            let Some(mut r) = self.reread.take() else {
+                return;
+            };
+            let run = r.take_run(self.len);
+            if let Some(run) = run {
+                self.append_run(&mut r, self.len, run);
+            }
+            self.reread = Some(r);
+            if run.is_none() {
+                return;
+            }
+        }
+    }
+
+    fn append_run(&mut self, r: &mut Reread<'a>, start: usize, run: QueuedRun) {
+        let mut ops = r.read(run);
+        let skip = run.pos - ops.pos();
+        for n in 0..run.len {
+            let next = if n == 0 && skip > 0 {
+                ops.try_nth(skip)
+            } else {
+                ops.try_next()
+            };
+            let Ok(Some(op)) = next else {
+                break;
+            };
+            let pred = if run.preds {
+                r.preds.remove(&(start + n)).unwrap_or_default()
+            } else {
+                Vec::new()
+            };
+            self.append(op.build(pred));
+            self.len += 1;
+        }
+        r.readers.push(ops);
     }
 
     fn append(&mut self, op: OpBuilder<'a>) {
@@ -423,10 +591,25 @@ impl<'a> ProgressiveEncoder<'a> {
     }
 
     fn flush(&mut self) {
-        let queue = std::mem::take(&mut self.queue);
-        for (_index, op) in queue {
-            self.append(op);
-            self.len += 1;
+        let mut queue = std::mem::take(&mut self.queue);
+        let mut reread = self.reread.take();
+        loop {
+            let next_op = queue.first_key_value().map(|(k, _)| *k);
+            let next_run = reread.as_ref().and_then(|r| r.first_run());
+            match (next_op, next_run, reread.as_mut()) {
+                (Some(o), r, _) if r.is_none_or(|r| o < r) => {
+                    if let Some(op) = queue.remove(&o) {
+                        self.append(op);
+                        self.len += 1;
+                    }
+                }
+                (_, Some(start), Some(r)) => {
+                    if let Some(run) = r.take_run(start) {
+                        self.append_run(r, start, run);
+                    }
+                }
+                _ => break,
+            }
         }
     }
 
@@ -551,11 +734,11 @@ impl<'a> ChangeBuilder<'a> {
         self.start_op + self.encoder.num_ops() - 1
     }
 
-    pub(crate) fn add(&mut self, op: OpBuilder<'a>) {
+    pub(crate) fn add(&mut self, op: OpBuilder<'a>, at: Option<(&'a OpSet, usize)>) {
         let counter = op.id.counter();
         let index = (counter - self.start_op) as usize;
 
-        self.encoder.add(index, op);
+        self.encoder.add(index, op, at);
     }
 }
 
@@ -577,7 +760,9 @@ impl<'a> ChangeCollector<'a> {
         for c in change_cols.iter() {
             meta.push(c);
         }
-        ChangeCollector::try_from_change_meta(meta, &op_set.actors)
+        let mut collector = ChangeCollector::try_from_change_meta(meta, &op_set.actors)?;
+        collector.op_set = Some(op_set);
+        Ok(collector)
     }
 
     pub(crate) fn process_ops(
@@ -642,6 +827,7 @@ impl<'a> ChangeCollector<'a> {
             builders,
             last: None,
             preds: HashMap::default(),
+            op_set: None,
         })
     }
 
@@ -773,6 +959,7 @@ impl<'a> ChangeCollector<'a> {
         let max = changes.iter().map(|c| c.max_op as usize).max().unwrap_or(0) + 1;
 
         let mut collector = Self::from_change_meta(changes, &op_set.actors);
+        collector.op_set = Some(op_set);
 
         for op in op_set.iter_ctr_range(min..max) {
             let op_id = op.id;
@@ -809,14 +996,17 @@ impl<'a> ChangeCollector<'a> {
 
         let pred = self.preds.remove(&op.id).unwrap_or_default();
 
+        let at = self.op_set.map(|op_set| (op_set, op.pos));
         let op = op.build(pred);
 
-        self.add(op);
+        if let Some(index) = self.builders_index(op.id) {
+            self.builders[index].add(op, at);
+        }
     }
 
     pub(crate) fn add(&mut self, op: OpBuilder<'a>) {
         if let Some(index) = self.builders_index(op.id) {
-            self.builders[index].add(op);
+            self.builders[index].add(op, None);
         }
     }
 
@@ -841,7 +1031,7 @@ impl<'a> ChangeCollector<'a> {
                 let op = Op::del(*id, obj, key.clone());
                 let op = op.build(pred.to_vec());
                 if let Some(index) = self.builders_index(op.id) {
-                    self.builders[index].add(op);
+                    self.builders[index].add(op, None);
                 }
             }
             self.preds.clear();
