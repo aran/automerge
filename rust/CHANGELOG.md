@@ -17,6 +17,9 @@
 * `ReadDoc::list_range` with an excluded start bound `n` starts at `n + 1`
   rather than `n - 1`.
 * `ReadDoc::values` on a text no longer yields marks as values.
+* `Automerge::apply_changes`, `load_incremental` and `merge` without a patch
+  log no longer build patch events only to drop them. This lowers peak memory
+  by about 30% in a test on a large document.
 
 ## 0.12.0
 
