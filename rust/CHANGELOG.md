@@ -32,6 +32,8 @@
 * `Automerge::load` and `get_changes` use less peak memory on large changes
   that delete text or list elements. This lowers peak memory by about 40% in a
   test on a large document.
+* Sync no longer loops forever when a restored sync state names a change
+  neither peer has.
 
 ## 0.12.0
 
