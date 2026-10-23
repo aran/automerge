@@ -16,6 +16,7 @@
   step went from 14.7ms to 0.47ms.
 * `ReadDoc::list_range` with an excluded start bound `n` starts at `n + 1`
   rather than `n - 1`.
+* `ReadDoc::values` on a text no longer yields marks as values.
 
 ## 0.12.0
 
