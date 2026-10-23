@@ -34,6 +34,8 @@
   test on a large document.
 * Sync no longer loops forever when a restored sync state names a change
   neither peer has.
+* `SyncDoc::receive_sync_message` returns an error, and applies nothing, when
+  a message's changes do not parse.
 
 ## 0.12.0
 
