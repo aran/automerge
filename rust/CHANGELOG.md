@@ -14,6 +14,8 @@
   whole object. It finds where the change lands through the op set's index, as
   a local edit does. In the `apply/single_char_incremental_load` benchmark a
   step went from 14.7ms to 0.47ms.
+* `ReadDoc::list_range` with an excluded start bound `n` starts at `n + 1`
+  rather than `n - 1`.
 
 ## 0.12.0
 
