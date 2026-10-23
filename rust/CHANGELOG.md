@@ -43,6 +43,9 @@
   a message's changes do not parse.
 * `SyncDoc::receive_sync_message` also returns an error for changes that do
   not parse when the receiving document is empty.
+* `Automerge::load_with` and `load_with_options` no longer log an error at
+  ERROR level when they return it, as they did for every `MissingDeps` from
+  loading part of a document.
 
 ## 0.12.0
 
