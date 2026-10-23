@@ -23,6 +23,8 @@
 * Applying changes holds one copy of their ops rather than two, and puts them
   in document order without scratch space. This lowers peak memory by about
   30% in a test on a large document.
+* Loading a document no longer sets aside room for a mark at every op. This
+  lowers peak memory by about 20% in a test on a large document.
 
 ## 0.12.0
 
